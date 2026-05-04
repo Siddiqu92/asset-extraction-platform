@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { execFile } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -26,6 +26,15 @@ export class ExtractionService {
 
   private readonly chunkSizeChars = 30_000;
 
+  /** Prefer `PYTHON_RULE_ENGINE` (full path); else resolve `sys.executable` from `python` / `python3`. */
+  private resolvedPythonPath: string | null = null;
+
+  private readonly geminiModelCandidates = [
+    'gemini-2.0-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash-8b',
+  ] as const;
+
   private getClient(): GoogleGenerativeAI {
     const apiKey = process.env.GEMINI_API_KEY ?? '';
     return new GoogleGenerativeAI(apiKey);
@@ -41,8 +50,44 @@ export class ExtractionService {
     return fromDist;
   }
 
-  private pythonExecutable(): string {
-    return process.platform === 'win32' ? 'python' : 'python3';
+  private resolvePythonExecutable(): string {
+    const fromEnv = (process.env.PYTHON_RULE_ENGINE ?? '').trim();
+    if (fromEnv) {
+      if (fs.existsSync(fromEnv)) {
+        this.resolvedPythonPath = fromEnv;
+        return fromEnv;
+      }
+      this.logger.warn(`PYTHON_RULE_ENGINE not found on disk: ${fromEnv}`);
+    }
+    if (this.resolvedPythonPath) {
+      return this.resolvedPythonPath;
+    }
+
+    const launcher = process.platform === 'win32' ? 'python' : 'python3';
+    try {
+      const out = execFileSync(
+        launcher,
+        ['-c', 'import sys; print(sys.executable)'],
+        { encoding: 'utf8', windowsHide: true },
+      )
+        .trim()
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .pop();
+      if (out && fs.existsSync(out)) {
+        this.resolvedPythonPath = out;
+        this.logger.log(`Rule engine Python (resolved): ${out}`);
+        return out;
+      }
+    } catch {
+      /* use launcher below */
+    }
+
+    this.resolvedPythonPath = launcher;
+    this.logger.warn(
+      `Rule engine Python: using "${launcher}" (set PYTHON_RULE_ENGINE to a full path if imports fail)`,
+    );
+    return launcher;
   }
 
   async extractAssets(input: ExtractInput): Promise<Asset[]> {
@@ -64,31 +109,39 @@ export class ExtractionService {
       }
 
       let aiAssets: Asset[] = [];
-      const isPdf = (fileType ?? '').toLowerCase() === 'pdf';
+      const ft = (fileType ?? '').toLowerCase();
+      const isPdf = ft === 'pdf';
+      const isStructured = ['csv', 'xlsx', 'xls', 'zip'].includes(ft);
       const geminiKey = (process.env.GEMINI_API_KEY ?? '').trim();
       const geminiUsable =
         geminiKey.length > 0 && !geminiKey.includes('your_key') && geminiKey !== 'your_key_here';
 
-      if (isPdf && documentText && documentText.length > 100 && geminiUsable) {
+      const needsAI =
+        isPdf &&
+        !!(documentText && documentText.length > 100) &&
+        geminiUsable &&
+        ruleBasedAssets.length < 10;
+
+      if (isStructured) {
+        this.logger.log(
+          `Skipping AI extraction for structured file type "${ft}" (rule engine only)`,
+        );
+      }
+
+      if (needsAI) {
         try {
           const filteredText = this.filterRelevantText(documentText);
           const chunks = this.chunkText(filteredText);
           this.logger.log(`AI extraction: ${chunks.length} chunks for ${sourceFile}`);
 
-          const client = this.getClient();
           const system = this.buildSystemPrompt();
-          const model = client.getGenerativeModel({
-            model: 'gemini-1.5-flash',
-            systemInstruction: system,
-            generationConfig: { maxOutputTokens: 8192, temperature: 0.1 },
-          });
 
           const chunksToProcess = chunks.slice(0, 3);
           for (let i = 0; i < chunksToProcess.length; i++) {
             try {
               this.logger.log(`AI chunk ${i + 1}/${chunksToProcess.length}`);
-              const rawText = await this.callGeminiWithRetry(
-                model,
+              const rawText = await this.generateGeminiWithModelFallback(
+                system,
                 this.buildPrompt(chunksToProcess[i]),
               );
               const parsed = this.parseResponse(rawText);
@@ -109,6 +162,12 @@ export class ExtractionService {
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.warn(`AI extraction skipped: ${msg.substring(0, 120)}`);
+        }
+      } else if (isPdf && documentText && documentText.length > 100 && geminiUsable && !needsAI) {
+        if (ruleBasedAssets.length >= 10) {
+          this.logger.log(
+            `Skipping AI extraction (PDF already has ${ruleBasedAssets.length} rule-based assets)`,
+          );
         }
       } else if (isPdf && documentText && documentText.length > 100 && !geminiUsable) {
         this.logger.log('AI extraction skipped (GEMINI_API_KEY missing or placeholder)');
@@ -151,7 +210,7 @@ export class ExtractionService {
 
     try {
       const { stdout, stderr } = await execFileAsync(
-        this.pythonExecutable(),
+        this.resolvePythonExecutable(),
         [scriptPath, filePath],
         {
           timeout: 120_000,
@@ -390,40 +449,60 @@ export class ExtractionService {
     }
   }
 
-  private async callGeminiWithRetry(
-    model: { generateContent: (prompt: string) => Promise<{ response: { text: () => string } }> },
+  /**
+   * Tries multiple Gemini model IDs (API surface changes) with per-model retries.
+   */
+  private async generateGeminiWithModelFallback(
+    systemInstruction: string,
     prompt: string,
-    maxRetries = 3,
+    maxRetriesPerModel = 3,
   ): Promise<string> {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        const result = await model.generateContent(prompt);
-        return result.response.text();
-      } catch (err: unknown) {
-        const errAny = err as { message?: string };
-        const msg =
-          typeof errAny?.message === 'string' ? errAny.message : String(err ?? '');
+    const client = this.getClient();
 
-        const isRetryable =
-          msg.includes('503') ||
-          msg.includes('Service Unavailable') ||
-          msg.includes('429') ||
-          msg.includes('Too Many Requests');
+    for (const modelName of this.geminiModelCandidates) {
+      const model = client.getGenerativeModel({
+        model: modelName,
+        systemInstruction,
+        generationConfig: { maxOutputTokens: 8192, temperature: 0.1 },
+      });
 
-        if (isRetryable && attempt < maxRetries) {
-          const retryMatch = msg.match(/retry in (\d+(?:\.\d+)?)s/i);
-          const waitMs = retryMatch
-            ? Math.ceil(parseFloat(retryMatch[1])) * 1000 + 2000
-            : attempt * 5000;
+      for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
+        try {
+          this.logger.log(`Gemini ${modelName} attempt ${attempt}`);
+          const result = await model.generateContent(prompt);
+          return result.response.text();
+        } catch (err: unknown) {
+          const errAny = err as { message?: string };
+          const msg =
+            typeof errAny?.message === 'string' ? errAny.message : String(err ?? '');
+
+          const isRetryable =
+            msg.includes('503') ||
+            msg.includes('Service Unavailable') ||
+            msg.includes('429') ||
+            msg.includes('Too Many Requests') ||
+            msg.toLowerCase().includes('overloaded');
+
+          if (isRetryable && attempt < maxRetriesPerModel) {
+            const retryMatch = msg.match(/retry in (\d+(?:\.\d+)?)s/i);
+            const waitMs = retryMatch
+              ? Math.ceil(parseFloat(retryMatch[1])) * 1000 + 2000
+              : attempt * 3000;
+            this.logger.warn(
+              `Gemini rate limited (${modelName}). Waiting ${waitMs}ms before retry ${attempt}/${maxRetriesPerModel}`,
+            );
+            await new Promise((res) => setTimeout(res, waitMs));
+            continue;
+          }
+
           this.logger.warn(
-            `Rate limited. Waiting ${waitMs}ms before retry ${attempt}/${maxRetries}`,
+            `Gemini model ${modelName} failed: ${msg.substring(0, 140)} — trying next model`,
           );
-          await new Promise((res) => setTimeout(res, waitMs));
-          continue;
+          break;
         }
-        throw err;
       }
     }
+
     return '';
   }
 

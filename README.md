@@ -26,8 +26,10 @@ Backend default port is defined in `backend/src/main.ts` (commonly `3000`). Poin
 The rule engine is invoked with `python` on Windows and `python3` elsewhere. Install:
 
 ```bash
-pip install pdfplumber openpyxl
+python -m pip install pdfplumber openpyxl
 ```
+
+Use the **same interpreter** the Nest process will spawn (`python` on Windows, `python3` on Unix). If imports still fail, set **`PYTHON_RULE_ENGINE`** in `backend/.env` to the full path of that executable (for example `C:\Python314\python.exe` on Windows).
 
 On Linux/macOS you may use `pip3`. Without **openpyxl**, Excel paths return no rows; without **pdfplumber**, PDF table extraction returns an empty list (PDFs still get text via `pdf-parse` and optional Gemini if configured).
 

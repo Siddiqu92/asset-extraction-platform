@@ -686,6 +686,9 @@ if __name__ == "__main__":
         print(json.dumps([]))
         sys.exit(0)
 
+    print(f"Python: {sys.version}", file=sys.stderr)
+    print(f"Path: {sys.executable}", file=sys.stderr)
+
     try:
         if ext == ".csv":
             assets = extract_from_csv(file_path)
