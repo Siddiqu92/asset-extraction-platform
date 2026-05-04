@@ -111,131 +111,300 @@ def extract_from_csv(file_path: str) -> list:
     return assets
 
 
-def extract_from_xlsx(file_path: str) -> list:
+def _norm_header_cell(s) -> str:
+    return re.sub(r"\s+", " ", str(s).strip().lower()) if s is not None else ""
+
+
+def extract_from_xlsx(file_path: str, sheet_name=None) -> list:
+    """Excel extraction with EIA-style support: title row then headers (row index 1)."""
     import openpyxl
 
     assets = []
-    wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
 
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        rows = list(ws.iter_rows(values_only=True))
-        if not rows:
-            continue
+    try:
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+    except Exception as e:
+        print(f"Cannot open xlsx: {e}", file=sys.stderr)
+        return []
 
-        header_row_idx = 0
-        headers = []
-        for i, row in enumerate(rows[:10]):
-            row_strs = [str(c).lower().strip() if c else "" for c in row]
-            if any(
-                kw in " ".join(row_strs)
-                for kw in [
-                    "name",
-                    "value",
-                    "asset",
-                    "address",
-                    "property",
-                    "installation",
-                ]
-            ):
-                headers = [str(c).strip() if c else f"col_{j}" for j, c in enumerate(row)]
-                header_row_idx = i
-                break
+    if sheet_name and sheet_name in wb.sheetnames:
+        sheets_to_process = [sheet_name]
+    else:
+        sheets_to_process = list(wb.sheetnames)
 
-        if not headers:
-            headers = [f"col_{j}" for j in range(len(rows[0]) if rows else 0)]
+    def header_key_map(header_row):
+        """Map normalized header -> column index (first wins)."""
+        hmap = {}
+        for i, cell in enumerate(header_row):
+            key = _norm_header_cell(cell)
+            if not key:
+                key = f"__col_{i}"
+            if key not in hmap:
+                hmap[key] = i
+        return hmap
 
-        for i, row in enumerate(rows[header_row_idx + 1 :], start=header_row_idx + 1):
-            if i > 1000:
-                break
-            if not row or not any(row):
+    def header_matches(n: str, hl: str) -> bool:
+        if not n or not hl:
+            return False
+        if hl == n:
+            return True
+        if hl.startswith(n + " ") or hl.startswith(n + "(") or hl.startswith(n + ","):
+            return True
+        if len(n) >= 8 and n in hl:
+            return True
+        if hl.startswith(n) and len(n) <= 12:
+            rest = hl[len(n) : len(n) + 1]
+            if not rest or rest in " (_./-":
+                return True
+        return False
+
+    def col_index(hmap, header_cells_lower: list, *candidates):
+        """Resolve column by exact or safe substring match (candidates in priority order)."""
+        for name in candidates:
+            if not name:
+                continue
+            n = name.lower().strip()
+            if n in hmap:
+                return hmap[n]
+            for j, hl in enumerate(header_cells_lower):
+                if header_matches(n, hl):
+                    return j
+        return None
+
+    def get_col(row, hmap, header_cells_lower, *names):
+        idx = col_index(hmap, header_cells_lower, *names)
+        if idx is None or idx >= len(row):
+            return None
+        val = row[idx]
+        if val is None:
+            return None
+        s = str(val).strip()
+        return s if s else None
+
+    for sname in sheets_to_process:
+        try:
+            ws = wb[sname]
+            rows = list(ws.iter_rows(values_only=True))
+            if len(rows) < 2:
                 continue
 
-            row_dict = {}
-            for j, val in enumerate(row):
-                if j < len(headers):
-                    row_dict[headers[j]] = val
-
-            name = None
-            for key in [
-                "Installation Name",
-                "Asset Name",
-                "Property Name",
-                "Name",
-                "Address",
-            ]:
-                for k, v in row_dict.items():
-                    if key.lower() in k.lower() and v:
-                        name = str(v).strip()
-                        break
-                if name:
+            header_row_idx = 0
+            headers = []
+            for i, row in enumerate(rows[:5]):
+                row_strs = [str(c).strip() if c is not None else "" for c in row]
+                non_empty = [
+                    s
+                    for s in row_strs
+                    if s and not s.replace(".", "").replace("-", "").isdigit()
+                ]
+                if len(non_empty) >= 3:
+                    headers = row_strs
+                    header_row_idx = i
                     break
 
-            if not name:
-                first_val = next(
-                    (str(v).strip() for v in row if v and str(v).strip()), None
-                )
-                if first_val and len(first_val) > 2:
-                    name = first_val[:200]
-
-            if not name:
+            if not headers:
                 continue
 
-            value = None
-            for k, v in row_dict.items():
-                if any(
-                    kw in k.lower() for kw in ["value", "cost", "amount", "acres", "sqft", "area"]
+            hmap = header_key_map(headers)
+            header_cells_lower = [_norm_header_cell(c) for c in headers]
+
+            print(
+                f"Sheet '{sname}': {len(rows)} rows, header at row {header_row_idx}",
+                file=sys.stderr,
+            )
+
+            for i, row in enumerate(rows[header_row_idx + 1 :], start=header_row_idx + 1):
+                if i > 20000:
+                    break
+                if not row or not any(c is not None for c in row):
+                    continue
+
+                name = (
+                    get_col(
+                        row,
+                        hmap,
+                        header_cells_lower,
+                        "plant name",
+                        "asset name",
+                        "installation name",
+                        "property name",
+                        "facility name",
+                        "name",
+                    )
+                    or get_col(
+                        row,
+                        hmap,
+                        header_cells_lower,
+                        "bldg address1",
+                        "street address",
+                        "address",
+                    )
+                )
+
+                if not name or len(name.strip()) < 2:
+                    continue
+
+                value = None
+                value_basis = None
+                for col in (
+                    "nameplate capacity (mw)",
+                    "net summer capacity (mw)",
+                    "net winter capacity (mw)",
+                    "summer capacity (mw)",
+                    "winter capacity (mw)",
+                    "capacity (mw)",
+                    "value",
+                    "assessed value",
+                    "total value",
+                    "cost",
+                    "amount",
                 ):
-                    if v is not None:
+                    v = get_col(row, hmap, header_cells_lower, col)
+                    if v:
                         try:
-                            cleaned = re.sub(r"[$,\s]", "", str(v))
-                            value = float(cleaned)
+                            value = float(str(v).replace(",", "").replace("$", ""))
+                            value_basis = col
                             break
-                        except ValueError:
+                        except (TypeError, ValueError):
                             pass
 
-            jurisdiction = None
-            for k, v in row_dict.items():
-                if any(
-                    kw in k.lower()
-                    for kw in ["state", "country", "jurisdiction", "region", "agency"]
-                ):
-                    if v:
-                        jurisdiction = str(v).strip()
-                        break
+                lat = None
+                lon = None
+                lat_str = get_col(row, hmap, header_cells_lower, "latitude", "lat")
+                lon_str = get_col(
+                    row, hmap, header_cells_lower, "longitude", "lon", "long"
+                )
+                try:
+                    if lat_str:
+                        lat = float(lat_str)
+                    if lon_str:
+                        lon = float(lon_str)
+                except (TypeError, ValueError):
+                    pass
 
-            assets.append(
-                {
-                    "assetName": name,
-                    "alternateName": [],
-                    "value": value,
-                    "currency": "USD",
-                    "jurisdiction": jurisdiction,
-                    "latitude": None,
-                    "longitude": None,
-                    "assetType": "Real Estate",
-                    "valueBasis": "Book Value",
-                    "parentAssetId": None,
-                    "childAssetIds": [],
-                    "fieldConfidence": {
-                        "assetName": 0.9,
-                        "value": 0.8 if value else 0.0,
-                        "jurisdiction": 0.75 if jurisdiction else 0.0,
-                    },
-                    "overallConfidence": 0.80 if value else 0.60,
-                    "sourceEvidence": [f"Sheet: {sheet_name}, Row: {i+1}"],
-                    "explanation": f'Extracted from Excel sheet "{sheet_name}" row {i+1}',
-                    "validationFlags": [],
-                    "duplicateClusterId": None,
-                    "reviewRecommendation": "auto-accept" if value else "review",
-                    "factType": {
-                        "assetName": "extracted",
-                        "value": "extracted" if value else "unsupported",
-                        "jurisdiction": "extracted" if jurisdiction else "inferred",
-                    },
-                }
-            )
-    return assets
+                jurisdiction = get_col(
+                    row,
+                    hmap,
+                    header_cells_lower,
+                    "state",
+                    "bldg state",
+                    "statecode",
+                    "country",
+                ) or get_col(row, hmap, header_cells_lower, "county", "city")
+
+                asset_type = (
+                    get_col(
+                        row,
+                        hmap,
+                        header_cells_lower,
+                        "sector name",
+                        "property type",
+                        "asset type",
+                        "primary purpose",
+                        "energy source",
+                        "type",
+                    )
+                    or "Asset"
+                )
+
+                alt_names = []
+                utility = get_col(
+                    row, hmap, header_cells_lower, "utility name", "owner", "operator"
+                )
+                if utility and utility != name:
+                    alt_names.append(utility)
+
+                addr = get_col(
+                    row,
+                    hmap,
+                    header_cells_lower,
+                    "street address",
+                    "bldg address1",
+                    "address",
+                )
+                city = get_col(row, hmap, header_cells_lower, "city", "bldg city")
+
+                has_coords = lat is not None and lon is not None
+                has_value = value is not None
+                has_jurisdiction = jurisdiction is not None
+
+                confidence = 0.55
+                if has_coords:
+                    confidence += 0.20
+                if has_value:
+                    confidence += 0.15
+                if has_jurisdiction:
+                    confidence += 0.10
+                confidence = min(confidence, 0.95)
+
+                if confidence >= 0.85:
+                    recommendation = "auto-accept"
+                elif confidence >= 0.50:
+                    recommendation = "review"
+                else:
+                    recommendation = "reject"
+
+                validation_flags = []
+                if has_coords:
+                    if lat is not None and not (-90 <= lat <= 90):
+                        validation_flags.append("invalid-latitude")
+                    if lon is not None and not (-180 <= lon <= 180):
+                        validation_flags.append("invalid-longitude")
+
+                ev = [f"Sheet: {sname}, Row: {i + 1}"]
+                if addr or city:
+                    ev.append(", ".join(x for x in [addr or "", city or ""] if x))
+
+                assets.append(
+                    {
+                        "assetName": name[:200],
+                        "alternateName": alt_names,
+                        "value": value,
+                        "currency": "USD",
+                        "jurisdiction": jurisdiction,
+                        "latitude": lat,
+                        "longitude": lon,
+                        "assetType": (asset_type[:100] if asset_type else "Asset"),
+                        "valueBasis": value_basis,
+                        "parentAssetId": None,
+                        "childAssetIds": [],
+                        "fieldConfidence": {
+                            "assetName": 0.90,
+                            "value": 0.85 if has_value else 0.0,
+                            "jurisdiction": 0.85 if has_jurisdiction else 0.0,
+                            "coordinates": 0.95 if has_coords else 0.0,
+                        },
+                        "overallConfidence": round(confidence, 2),
+                        "sourceEvidence": ev,
+                        "explanation": f'Extracted from Excel sheet "{sname}" row {i + 1}',
+                        "validationFlags": validation_flags,
+                        "duplicateClusterId": None,
+                        "reviewRecommendation": recommendation,
+                        "factType": {
+                            "assetName": "extracted",
+                            "value": "extracted" if has_value else "unsupported",
+                            "jurisdiction": "extracted"
+                            if has_jurisdiction
+                            else "inferred",
+                            "coordinates": "extracted"
+                            if has_coords
+                            else "unsupported",
+                        },
+                    }
+                )
+        except Exception as e:
+            print(f"Sheet '{sname}' error: {e}", file=sys.stderr)
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
+
+    try:
+        wb.close()
+    except Exception:
+        pass
+
+    print(f"XLSX total: {len(assets)} assets", file=sys.stderr)
+    return assets[:1000]
 
 
 def extract_from_zip(file_path: str) -> list:
@@ -262,7 +431,8 @@ def extract_from_zip(file_path: str) -> list:
                     if ext == ".csv":
                         extracted = extract_from_csv(tmp_path)
                     elif ext in [".xlsx", ".xls"]:
-                        extracted = extract_from_xlsx(tmp_path)
+                        # EIA-style workbooks: title row then headers (detected in extract_from_xlsx)
+                        extracted = extract_from_xlsx(tmp_path, sheet_name=None)
                     elif ext == ".pdf":
                         extracted = extract_from_pdf_tables(tmp_path)
                     else:
