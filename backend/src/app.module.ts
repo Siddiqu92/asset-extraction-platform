@@ -1,10 +1,21 @@
 import { Module } from '@nestjs/common';
-import { AppController } from './app.controller';
-import { AppService } from './app.service';
+import { ConfigModule } from '@nestjs/config';
+import { IngestionModule } from './ingestion/ingestion.module';
+import { DocumentUnderstandingModule } from './document-understanding/document-understanding.module';
+import { ExtractionModule } from './extraction/extraction.module';
+import { ReconciliationModule } from './reconciliation/reconciliation.module';
+import { ConfidenceModule } from './confidence/confidence.module';
+import { AssetsModule } from './assets/assets.module';
 
 @Module({
-  imports: [],
-  controllers: [AppController],
-  providers: [AppService],
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    IngestionModule,
+    DocumentUnderstandingModule,
+    ExtractionModule,
+    ReconciliationModule,
+    ConfidenceModule,
+    AssetsModule,
+  ],
 })
 export class AppModule {}

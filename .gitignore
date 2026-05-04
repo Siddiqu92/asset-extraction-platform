@@ -3,3 +3,9 @@ node_modules/
 dist/
 build/
 *.log
+
+# Local run artifacts
+backend/uploads/
+backend/stderr.txt
+backend/stdout.txt
+backend/upload-response.json
