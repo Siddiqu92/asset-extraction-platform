@@ -238,168 +238,217 @@ def extract_from_xlsx(file_path: str) -> list:
     return assets
 
 
+def extract_from_zip(file_path: str) -> list:
+    """Extract assets from all supported files inside a ZIP archive."""
+    import tempfile
+    import zipfile
+
+    assets = []
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            for name in zf.namelist():
+                if name.endswith("/") or "__MACOSX" in name or name.startswith("."):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in [".pdf", ".csv", ".xlsx", ".xls"]:
+                    continue
+
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    tmp.write(zf.read(name))
+                    tmp_path = tmp.name
+
+                try:
+                    print(f"Processing ZIP entry: {name}", file=sys.stderr)
+                    if ext == ".csv":
+                        extracted = extract_from_csv(tmp_path)
+                    elif ext in [".xlsx", ".xls"]:
+                        extracted = extract_from_xlsx(tmp_path)
+                    elif ext == ".pdf":
+                        extracted = extract_from_pdf_tables(tmp_path)
+                    else:
+                        extracted = []
+
+                    for a in extracted:
+                        ev = a.get("sourceEvidence") or []
+                        a["sourceEvidence"] = [f"ZIP entry: {name}"] + list(ev)
+
+                    assets.extend(extracted)
+                    print(f"ZIP entry {name}: {len(extracted)} assets", file=sys.stderr)
+                except Exception as e:
+                    print(f"ZIP entry {name} failed: {e}", file=sys.stderr)
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+    except Exception as e:
+        print(f"ZIP open failed: {e}", file=sys.stderr)
+
+    return assets[:4000]
+
+
 def extract_from_pdf_tables(file_path: str) -> list:
     try:
         import pdfplumber
     except ImportError:
+        print("pdfplumber not installed", file=sys.stderr)
         return []
 
     assets = []
-    financial_keywords = [
-        "asset",
-        "property",
-        "portfolio",
-        "investment",
-        "value",
-        "noi",
-        "million",
-        "billion",
-        "usd",
-        "cad",
-        "gbp",
-        "eur",
-        "building",
-        "land",
-        "real estate",
-        "fund",
-        "equity",
-        "loan",
-        "mortgage",
-        "acquisition",
-        "market value",
-        "fair value",
-        "assessed",
-        "carrying value",
-    ]
 
     try:
         with pdfplumber.open(file_path) as pdf:
-            for page_num, page in enumerate(pdf.pages[:50]):
-                tables = page.extract_tables()
-                for table in tables or []:
-                    if not table or len(table) < 2:
-                        continue
+            total_pages = len(pdf.pages)
+            print(f"PDF has {total_pages} pages", file=sys.stderr)
 
-                    flat = " ".join(
-                        str(c).lower() for row in table for c in (row or []) if c
-                    )
-                    if not any(kw in flat for kw in financial_keywords):
-                        continue
+            for page_num, page in enumerate(pdf.pages[:60]):
+                try:
+                    tables = page.extract_tables(
+                        {
+                            "vertical_strategy": "lines",
+                            "horizontal_strategy": "lines",
+                        }
+                    ) or []
 
-                    header_row = table[0] or []
-                    headers = [str(c).strip().lower() if c else "" for c in header_row]
+                    if not tables:
+                        tables = page.extract_tables(
+                            {
+                                "vertical_strategy": "text",
+                                "horizontal_strategy": "text",
+                            }
+                        ) or []
 
-                    for row in table[1:]:
-                        if not row or not any(row):
+                    for table in tables:
+                        if not table or len(table) < 2:
                             continue
 
-                        name = None
-                        value = None
-                        jurisdiction = None
-
-                        for j, cell in enumerate(row):
-                            if not cell or not str(cell).strip():
+                        for row_idx, row in enumerate(table[1:], 1):
+                            if not row or not any(c for c in row if c):
                                 continue
-                            cell_str = str(cell).strip()
 
-                            if name is None and len(cell_str) > 2:
-                                if not re.match(r"^[\d\s$.,%()]+$", cell_str):
-                                    name = cell_str[:200]
+                            cells = [str(c).strip() if c else "" for c in row]
 
-                            if value is None:
-                                money = re.search(
-                                    r"\$?([\d,]+\.?\d*)\s*(B|M|K|billion|million|thousand)?",
-                                    cell_str,
+                            name = None
+                            value = None
+                            jurisdiction = None
+
+                            for j, cell in enumerate(cells):
+                                if not cell:
+                                    continue
+
+                                if name is None and len(cell) > 2:
+                                    if not re.match(r"^[\d\s$.,%()\-/]+$", cell):
+                                        name = cell[:200]
+
+                                if value is None:
+                                    m = re.search(
+                                        r"\$?\s*([\d,]+\.?\d*)\s*(B|M|K|billion|million|thousand)?",
+                                        cell,
+                                    )
+                                    if m:
+                                        try:
+                                            num = float(m.group(1).replace(",", ""))
+                                            mult = {
+                                                "B": 1e9,
+                                                "billion": 1e9,
+                                                "M": 1e6,
+                                                "million": 1e6,
+                                                "K": 1e3,
+                                                "thousand": 1e3,
+                                            }.get(m.group(2) or "", 1)
+                                            candidate = num * mult
+                                            # Typical assessed values; skip tiny integers (parcel fragments)
+                                            if 1000 <= candidate <= 1e13:
+                                                value = candidate
+                                        except (TypeError, ValueError, AttributeError):
+                                            pass
+
+                            if name and len(name.strip()) > 2:
+                                confidence = 0.80 if value else 0.60
+                                assets.append(
+                                    {
+                                        "assetName": name,
+                                        "alternateName": [],
+                                        "value": value,
+                                        "currency": "USD",
+                                        "jurisdiction": jurisdiction,
+                                        "latitude": None,
+                                        "longitude": None,
+                                        "assetType": "Investment Asset",
+                                        "valueBasis": "Reported Value" if value else None,
+                                        "parentAssetId": None,
+                                        "childAssetIds": [],
+                                        "fieldConfidence": {
+                                            "assetName": 0.85,
+                                            "value": 0.80 if value else 0.0,
+                                        },
+                                        "overallConfidence": confidence,
+                                        "sourceEvidence": [
+                                            f"Page {page_num + 1}, table row {row_idx}"
+                                        ],
+                                        "explanation": f"Extracted from table on PDF page {page_num + 1}",
+                                        "validationFlags": [],
+                                        "duplicateClusterId": None,
+                                        "reviewRecommendation": "review",
+                                        "factType": {
+                                            "assetName": "extracted",
+                                            "value": "extracted" if value else "unsupported",
+                                        },
+                                    }
                                 )
-                                if money:
-                                    try:
-                                        num = float(money.group(1).replace(",", ""))
-                                        multiplier = {
-                                            "B": 1e9,
-                                            "billion": 1e9,
-                                            "M": 1e6,
-                                            "million": 1e6,
-                                            "K": 1e3,
-                                            "thousand": 1e3,
-                                        }.get(money.group(2), 1)
-                                        value = num * multiplier
-                                    except (TypeError, ValueError, AttributeError):
-                                        pass
+                except Exception as e:
+                    print(f"Table extraction page {page_num + 1}: {e}", file=sys.stderr)
 
-                        if name and len(name) > 2:
-                            assets.append(
-                                {
-                                    "assetName": name,
-                                    "alternateName": [],
-                                    "value": value,
-                                    "currency": "USD",
-                                    "jurisdiction": jurisdiction,
-                                    "latitude": None,
-                                    "longitude": None,
-                                    "assetType": "Investment Asset",
-                                    "valueBasis": "Market Value",
-                                    "parentAssetId": None,
-                                    "childAssetIds": [],
-                                    "fieldConfidence": {
-                                        "assetName": 0.85,
-                                        "value": 0.75 if value else 0.0,
-                                    },
-                                    "overallConfidence": 0.75 if value else 0.55,
-                                    "sourceEvidence": [f"Page {page_num+1} table in PDF"],
-                                    "explanation": f"Extracted from table on page {page_num+1}",
-                                    "validationFlags": [],
-                                    "duplicateClusterId": None,
-                                    "reviewRecommendation": "review",
-                                    "factType": {
-                                        "assetName": "extracted",
-                                        "value": "extracted" if value else "unsupported",
-                                    },
-                                }
-                            )
-
-                if not tables:
+                try:
                     text = page.extract_text() or ""
+                    if not text.strip():
+                        continue
+
                     lines = text.split("\n")
-                    for line in lines:
-                        if any(kw in line.lower() for kw in financial_keywords):
-                            money_match = re.search(
-                                r"([A-Za-z][A-Za-z\s,\.]{5,50})\s*[\$]?\s*([\d,]+\.?\d*)\s*(B|M|K|billion|million|thousand)?",
-                                line,
-                            )
-                            if money_match:
-                                nm = money_match.group(1).strip()
-                                if len(nm) > 3 and not nm.replace(" ", "").isdigit():
-                                    try:
-                                        num = float(money_match.group(2).replace(",", ""))
-                                        mult = {
-                                            "B": 1e9,
-                                            "billion": 1e9,
-                                            "M": 1e6,
-                                            "million": 1e6,
-                                            "K": 1e3,
-                                            "thousand": 1e3,
-                                        }.get(money_match.group(3), 1)
-                                        val = num * mult
+
+                    for line_idx, line in enumerate(lines):
+                        line = line.strip()
+                        if len(line) < 5:
+                            continue
+
+                        value_match = re.search(
+                            r"\b(\d{1,3}(?:,\d{3})+|\d{4,})\b", line
+                        )
+
+                        if value_match:
+                            try:
+                                val = float(value_match.group(1).replace(",", ""))
+                                if 1000 <= val <= 1e10:
+                                    before = line[: value_match.start()].strip()
+                                    name_parts = re.sub(
+                                        r"^[\d\-/.]+\s*", "", before
+                                    ).strip()
+
+                                    if len(name_parts) > 3 and not name_parts.replace(
+                                        " ", ""
+                                    ).isdigit():
                                         assets.append(
                                             {
-                                                "assetName": nm[:200],
+                                                "assetName": name_parts[:200],
                                                 "alternateName": [],
                                                 "value": val,
                                                 "currency": "USD",
                                                 "jurisdiction": None,
                                                 "latitude": None,
                                                 "longitude": None,
-                                                "assetType": "Financial Asset",
-                                                "valueBasis": "Reported Value",
+                                                "assetType": "Real Property",
+                                                "valueBasis": "Assessed Value",
                                                 "parentAssetId": None,
                                                 "childAssetIds": [],
                                                 "fieldConfidence": {
-                                                    "assetName": 0.7,
-                                                    "value": 0.65,
+                                                    "assetName": 0.70,
+                                                    "value": 0.75,
                                                 },
-                                                "overallConfidence": 0.65,
-                                                "sourceEvidence": [f"Page {page_num+1} text"],
-                                                "explanation": f"Extracted from narrative on page {page_num+1}",
+                                                "overallConfidence": 0.70,
+                                                "sourceEvidence": [
+                                                    f"Page {page_num + 1}, line {line_idx + 1}"
+                                                ],
+                                                "explanation": f"Extracted from text line on page {page_num + 1}",
                                                 "validationFlags": ["text-extracted"],
                                                 "duplicateClusterId": None,
                                                 "reviewRecommendation": "review",
@@ -409,20 +458,27 @@ def extract_from_pdf_tables(file_path: str) -> list:
                                                 },
                                             }
                                         )
-                                    except (TypeError, ValueError, AttributeError):
-                                        pass
+                            except (TypeError, ValueError, AttributeError):
+                                pass
+                except Exception as e:
+                    print(f"Text extraction page {page_num + 1}: {e}", file=sys.stderr)
+
     except Exception as e:
-        print(f"PDF extraction error: {e}", file=sys.stderr)
+        print(f"PDF open failed: {e}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
 
     seen = set()
     unique = []
     for a in assets:
-        key = a["assetName"].lower().strip()
+        key = a["assetName"].lower().strip()[:100]
         if key not in seen and len(key) > 2:
             seen.add(key)
             unique.append(a)
 
-    return unique
+    print(f"PDF extraction complete: {len(unique)} unique assets", file=sys.stderr)
+    return unique[:3000]
 
 
 if __name__ == "__main__":
@@ -440,10 +496,12 @@ if __name__ == "__main__":
             assets = extract_from_xlsx(file_path)
         elif ext == ".pdf":
             assets = extract_from_pdf_tables(file_path)
+        elif ext == ".zip":
+            assets = extract_from_zip(file_path)
         else:
             assets = []
 
-        print(json.dumps(assets[:200]))
+        print(json.dumps(assets[:2500]))
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         print(json.dumps([]))

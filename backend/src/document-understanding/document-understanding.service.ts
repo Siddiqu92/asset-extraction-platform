@@ -13,6 +13,9 @@ export class DocumentUnderstandingService {
       const normalized = fileType.toLowerCase();
       if (normalized === 'pdf') return await this.analyzePdf(filePath);
       if (['xlsx', 'xls', 'csv'].includes(normalized)) return await this.analyzeSpreadsheet(filePath);
+      if (normalized === 'zip') {
+        return { text: '', rawText: '', needsOcr: false, pageCount: 0, hasTable: true };
+      }
       const raw = await fs.promises.readFile(filePath, 'utf8').catch(() => '');
       return { text: raw, rawText: raw, needsOcr: false, pageCount: 1, hasTable: false };
     } catch (err: any) {

@@ -3,7 +3,7 @@ import { MulterModule } from '@nestjs/platform-express';
 import { IngestionController } from './ingestion.controller';
 import { IngestionService } from './ingestion.service';
 import { diskStorage } from 'multer';
-import { extname } from 'path';
+import * as path from 'path';
 import { DocumentUnderstandingModule } from '../document-understanding/document-understanding.module';
 import { ExtractionModule } from '../extraction/extraction.module';
 import { ConfidenceModule } from '../confidence/confidence.module';
@@ -17,12 +17,12 @@ import { AssetsModule } from '../assets/assets.module';
         destination: './uploads',
         filename: (req, file, cb) => {
           const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-          cb(null, uniqueSuffix + extname(file.originalname));
+          cb(null, uniqueSuffix + path.extname(file.originalname));
         },
       }),
       fileFilter: (req, file, cb) => {
         const allowed = ['.pdf', '.xlsx', '.xls', '.csv', '.zip'];
-        const ext = extname(file.originalname).toLowerCase();
+        const ext = path.extname(file.originalname).toLowerCase();
         if (allowed.includes(ext)) {
           cb(null, true);
         } else {
