@@ -30,14 +30,16 @@ export class ConfidenceService {
         updated.fieldConfidence.longitude = 0;
       }
 
-      // Base overallConfidence
-      let overall = this.clamp01(
+      // Refine overallConfidence (extract_tables already sets a profile-aware base).
+      const extractorBase = this.clamp01(
         typeof updated.overallConfidence === 'number' ? updated.overallConfidence : 0,
       );
-
-      if (updated.value === null) overall -= 0.2;
-      if (updated.jurisdiction === null) overall -= 0.1;
-      if (updated.latitude === null || updated.longitude === null) overall -= 0.15;
+      let penalty = 0;
+      if (updated.value === null) penalty += 0.1;
+      if (updated.jurisdiction === null) penalty += 0.05;
+      if (updated.latitude === null || updated.longitude === null) penalty += 0.08;
+      const cappedPenalty = Math.min(penalty, 0.15);
+      let overall = this.clamp01(extractorBase - cappedPenalty);
 
       if (!updated.assetName || updated.assetName.trim().length === 0) {
         updated.overallConfidence = 0;
@@ -45,7 +47,6 @@ export class ConfidenceService {
         return updated;
       }
 
-      overall = this.clamp01(overall);
       updated.overallConfidence = overall;
 
       if ((updated.validationFlags?.length ?? 0) > 3) {

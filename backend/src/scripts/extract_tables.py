@@ -31,6 +31,40 @@ def safe_str(v, limit=200):
     return s[:limit] if s else None
 
 
+def _base_confidence_for_profile(profile: str, has_val: bool, has_loc: bool, has_jur: bool) -> float:
+    """Deterministic base overall confidence by extraction source (Nest ConfidenceService may refine)."""
+    p = (profile or "default").lower()
+    base = {
+        "csv_with_coords": 0.86,
+        "csv_no_coords": 0.70,
+        "xlsx_with_coords": 0.80,
+        "xlsx_no_coords": 0.72,
+        "pdf_table": 0.75,
+        "pdf_text_assessment": 0.83,
+        "pdf_text_investor": 0.48,
+        "pdf_text_generic": 0.47,
+        "conflicting": 0.20,
+        "default": 0.62,
+    }.get(p, 0.62)
+    if not has_val:
+        base -= 0.15
+    base = max(0.05, min(0.95, round(base, 2)))
+    nm = 0
+    if not has_val and not has_loc and not has_jur:
+        nm = 1
+    if nm and base > 0.12:
+        base = min(base, 0.12)
+    return base
+
+
+def _review_from_confidence(confidence: float) -> str:
+    if confidence >= 0.85:
+        return "auto-accept"
+    if confidence >= 0.50:
+        return "review"
+    return "reject"
+
+
 def make_asset(
     name,
     value=None,
@@ -45,29 +79,17 @@ def make_asset(
     explanation="",
     validation_flags=None,
     fact_type=None,
+    extraction_profile="default",
 ):
     """Build a standard asset dict (compatible with Nest Asset / mapParsedToAssets)."""
     has_val = value is not None
     has_loc = lat is not None and lon is not None
     has_jur = jurisdiction is not None
 
-    confidence = 0.50
-    if has_val:
-        confidence += 0.15
-    if has_loc:
-        confidence += 0.20
-    if has_jur:
-        confidence += 0.10
-    if alt_names:
-        confidence += 0.05
-    confidence = min(round(confidence, 2), 0.95)
-
-    if confidence >= 0.85:
-        rec = "auto-accept"
-    elif confidence >= 0.50:
-        rec = "review"
-    else:
-        rec = "reject"
+    confidence = _base_confidence_for_profile(
+        extraction_profile, has_val, has_loc, has_jur
+    )
+    rec = _review_from_confidence(confidence)
 
     flags = list(validation_flags or [])
     if has_loc:
@@ -83,6 +105,11 @@ def make_asset(
         "coordinates": "extracted" if has_loc else "unsupported",
     }
 
+    fa = round(min(0.92, 0.72 + 0.06 * (1 if has_val else 0) + 0.08 * (1 if has_loc else 0)), 2)
+    fv = 0.85 if has_val else 0.0
+    fj = 0.82 if has_jur else 0.0
+    fc = 0.92 if has_loc else 0.0
+
     return {
         "assetName": str(name)[:200],
         "alternateName": alt_names or [],
@@ -97,10 +124,10 @@ def make_asset(
         "childAssetIds": [],
         "duplicateClusterId": None,
         "fieldConfidence": {
-            "assetName": 0.90,
-            "value": 0.85 if has_val else 0.0,
-            "jurisdiction": 0.85 if has_jur else 0.0,
-            "coordinates": 0.95 if has_loc else 0.0,
+            "assetName": fa,
+            "value": fv,
+            "jurisdiction": fj,
+            "coordinates": fc,
         },
         "overallConfidence": confidence,
         "sourceEvidence": evidence or [],
@@ -120,6 +147,69 @@ def dedup(assets):
             seen.add(key)
             out.append(a)
     return out
+
+
+def _is_year_number(v: float) -> bool:
+    if v is None or not isinstance(v, (int, float)):
+        return False
+    try:
+        iv = int(round(float(v)))
+    except (TypeError, ValueError):
+        return False
+    return 1900 <= iv <= 2100 and abs(float(v) - iv) < 0.01
+
+
+PDF_GARBAGE_LINE = re.compile(
+    r"(?i)^(form\s*10\b|for\s+the\s+y(ea)?r\b|annual\s+re(port)?\b|nnual\s+re\b|"
+    r"exact\s+name\b|table\s+of\s+contents\b|part\s+[ivx]+\b|item\s+\d+\b|"
+    r"common\s+stock\b|registered\s+holder\b)\b"
+)
+
+
+def _is_pdf_garbage_name(name: str) -> bool:
+    s = (name or "").strip()
+    if len(s) < 15:
+        return True
+    low = s.lower()
+    if PDF_GARBAGE_LINE.search(s):
+        return True
+    noise = ("incorporated", "securities and exchange", "forward-looking", "page ")
+    if any(p in low for p in noise):
+        return True
+    letters = len(re.findall(r"[a-zA-Z]", s))
+    if letters < 6:
+        return True
+    return False
+
+
+def _detect_pdf_kind(first_page_text: str) -> str:
+    t = (first_page_text or "").upper()
+    if "FINAL ASSESSMENT ROLL" in t or "ASSESSMENT ROLL" in t:
+        return "ny_assessment"
+    if "10-K" in t or "10K" in t or "FORM 10" in t or "ANNUAL REPORT" in t:
+        return "regulatory"
+    if "INVESTOR PRESENTATION" in t or ("INVESTOR" in t and "PRESENTATION" in t):
+        return "investor"
+    if "PORTFOLIO" in t and any(k in t for k in ("LOAN", "CRE", "DEBT", "FINANCING")):
+        return "investor"
+    return "generic"
+
+
+def _pdf_row_high_quality(kind: str, name: str, value, lat, lon) -> bool:
+    if not name or _is_pdf_garbage_name(name):
+        return False
+    has_loc = lat is not None and lon is not None
+    if kind == "ny_assessment":
+        if value is None or _is_year_number(value):
+            return False
+        return 5000 <= float(value) <= 1e11
+    if value is not None:
+        if _is_year_number(value) or float(value) < 100_000:
+            return False
+    else:
+        if not has_loc:
+            return False
+    return True
 
 
 def _header_match(col_name: str, header_key: str) -> bool:
@@ -267,6 +357,11 @@ def extract_from_csv(file_path: str) -> list:
                         "EUR" if "euro" in country.lower() else "USD"
                     )
 
+                prof = (
+                    "csv_with_coords"
+                    if lat is not None and lon is not None
+                    else "csv_no_coords"
+                )
                 assets.append(
                     make_asset(
                         name=name,
@@ -280,6 +375,7 @@ def extract_from_csv(file_path: str) -> list:
                         alt_names=alt,
                         evidence=[f"CSV row {i + 2}: {base}"],
                         explanation=f"Extracted from CSV row {i + 2}",
+                        extraction_profile=prof,
                     )
                 )
     except Exception as e:
@@ -420,6 +516,38 @@ def extract_from_xlsx(file_path: str) -> list:
                 if owner and owner != name:
                     alt.append(owner)
 
+                atype = asset_type
+                sl = sname.lower()
+                if lat is not None and lon is not None and (
+                    "plant" in sl
+                    or "860" in base.lower()
+                    or "generator" in sl
+                ):
+                    tech = (atype or "").lower()
+                    if any(
+                        k in tech
+                        for k in (
+                            "wind",
+                            "solar",
+                            "hydro",
+                            "nuclear",
+                            "gas",
+                            "coal",
+                            "oil",
+                            "dam",
+                            "storage",
+                            "water",
+                        )
+                    ) or (not atype or atype == "Asset"):
+                        atype = "Power Generation Asset"
+                if (not atype or atype == "Asset") and owner and "utility" in sl:
+                    atype = "Electric Utility"
+
+                prof = (
+                    "xlsx_with_coords"
+                    if lat is not None and lon is not None
+                    else "xlsx_no_coords"
+                )
                 sheet_assets.append(
                     make_asset(
                         name=name,
@@ -427,11 +555,12 @@ def extract_from_xlsx(file_path: str) -> list:
                         jurisdiction=jurisdiction,
                         lat=lat,
                         lon=lon,
-                        asset_type=asset_type,
+                        asset_type=atype,
                         value_basis=value_basis,
                         alt_names=alt,
                         evidence=[f"Sheet: {sname}, Row: {i + 1}", base],
                         explanation=f'Extracted from Excel sheet "{sname}" row {i + 1}',
+                        extraction_profile=prof,
                     )
                 )
 
@@ -453,6 +582,16 @@ def extract_from_xlsx(file_path: str) -> list:
 # ─── PDF ────────────────────────────────────────────────────────────────────
 
 
+def _pdf_default_asset_type(kind: str) -> str:
+    if kind == "ny_assessment":
+        return "Real Property"
+    if kind == "investor":
+        return "Investment Asset"
+    if kind == "regulatory":
+        return "Regulatory Filing"
+    return "Reported Entity"
+
+
 def extract_from_pdf_tables(file_path: str) -> list:
     try:
         import pdfplumber
@@ -464,12 +603,18 @@ def extract_from_pdf_tables(file_path: str) -> list:
         return []
 
     assets = []
+    kind = "generic"
     base = os.path.basename(file_path)
 
     try:
         with pdfplumber.open(file_path) as pdf:
             total = len(pdf.pages)
-            print(f"PDF: {total} pages ({base})", file=sys.stderr)
+            if not pdf.pages:
+                return []
+            sample = (pdf.pages[0].extract_text() or "")[:8000]
+            kind = _detect_pdf_kind(sample)
+            skip_text = kind == "regulatory"
+            print(f"PDF: {total} pages kind={kind} skip_text={skip_text} ({base})", file=sys.stderr)
 
             for page_num, page in enumerate(pdf.pages[:80]):
                 for strategy in [
@@ -494,7 +639,7 @@ def extract_from_pdf_tables(file_path: str) -> list:
                                 for cell in cells:
                                     if not cell:
                                         continue
-                                    if name is None and len(cell) > 2:
+                                    if name is None and len(cell) >= 8:
                                         if not re.match(
                                             r"^[\d\s$.,%()\-/]+$", cell
                                         ):
@@ -528,25 +673,37 @@ def extract_from_pdf_tables(file_path: str) -> list:
                                             ):
                                                 pass
 
-                                if name and len(name.strip()) > 2:
-                                    assets.append(
-                                        make_asset(
-                                            name=name,
-                                            value=value,
-                                            asset_type="Investment Asset",
-                                            value_basis="Reported Value"
-                                            if value
-                                            else None,
-                                            evidence=[
-                                                f"PDF page {page_num + 1}, table row {row_idx}"
-                                            ],
-                                            explanation=f"Table extraction page {page_num + 1}",
-                                        )
+                                nm = (name or "").strip()
+                                if len(nm) < 12 or _is_pdf_garbage_name(nm):
+                                    continue
+                                if value is not None and _is_year_number(float(value)):
+                                    continue
+                                if kind not in ("ny_assessment",) and value is not None:
+                                    if float(value) < 100_000:
+                                        continue
+
+                                assets.append(
+                                    make_asset(
+                                        name=nm,
+                                        value=value,
+                                        asset_type=_pdf_default_asset_type(kind),
+                                        value_basis="Reported Value"
+                                        if value
+                                        else None,
+                                        evidence=[
+                                            f"PDF page {page_num + 1}, table row {row_idx}"
+                                        ],
+                                        explanation=f"Table extraction page {page_num + 1}",
+                                        extraction_profile="pdf_table",
                                     )
+                                )
                         if tables:
                             break
                     except Exception:
                         pass
+
+                if skip_text:
+                    continue
 
                 try:
                     text = page.extract_text() or ""
@@ -554,38 +711,63 @@ def extract_from_pdf_tables(file_path: str) -> list:
 
                     for line_idx, line in enumerate(lines):
                         line = line.strip()
-                        if len(line) < 8:
+                        if len(line) < 12:
                             continue
 
                         m = re.search(
                             r"\b(\d{1,3}(?:,\d{3})+|\d{6,})\b", line
                         )
-                        if m:
-                            try:
-                                val = float(m.group(1).replace(",", ""))
-                                if 5000 <= val <= 1e10:
-                                    before = line[: m.start()].strip()
-                                    name_part = re.sub(
-                                        r"^[\d\-/. ]+", "", before
-                                    ).strip()
-                                    if len(name_part) > 3 and not name_part.replace(
-                                        " ", ""
-                                    ).isdigit():
-                                        assets.append(
-                                            make_asset(
-                                                name=name_part[:200],
-                                                value=val,
-                                                asset_type="Real Property",
-                                                value_basis="Assessed Value",
-                                                evidence=[
-                                                    f"PDF page {page_num + 1}, line {line_idx + 1}"
-                                                ],
-                                                explanation=f"Text extraction page {page_num + 1}",
-                                                validation_flags=["text-extracted"],
-                                            )
-                                        )
-                            except (TypeError, ValueError, AttributeError):
-                                pass
+                        if not m:
+                            continue
+                        try:
+                            val = float(m.group(1).replace(",", ""))
+                        except (TypeError, ValueError, AttributeError):
+                            continue
+
+                        if _is_year_number(val):
+                            continue
+
+                        if kind == "ny_assessment":
+                            if not (5000 <= val <= 1e11):
+                                continue
+                        else:
+                            if not (100_000 <= val <= 1e13):
+                                continue
+
+                        before = line[: m.start()].strip()
+                        name_part = re.sub(r"^[\d\-/. ]+", "", before).strip()
+                        if len(name_part) < 15 or _is_pdf_garbage_name(name_part):
+                            continue
+                        if name_part.replace(" ", "").isdigit():
+                            continue
+
+                        tprof = (
+                            "pdf_text_assessment"
+                            if kind == "ny_assessment"
+                            else (
+                                "pdf_text_investor"
+                                if kind == "investor"
+                                else "pdf_text_generic"
+                            )
+                        )
+                        assets.append(
+                            make_asset(
+                                name=name_part[:200],
+                                value=val,
+                                asset_type="Real Property"
+                                if kind == "ny_assessment"
+                                else _pdf_default_asset_type(kind),
+                                value_basis="Assessed Value"
+                                if kind == "ny_assessment"
+                                else "Reported Value",
+                                evidence=[
+                                    f"PDF page {page_num + 1}, line {line_idx + 1}"
+                                ],
+                                explanation=f"Text extraction page {page_num + 1}",
+                                validation_flags=["text-extracted"],
+                                extraction_profile=tprof,
+                            )
+                        )
                 except Exception:
                     pass
 
@@ -594,10 +776,25 @@ def extract_from_pdf_tables(file_path: str) -> list:
         traceback.print_exc(file=sys.stderr)
 
     result = dedup(assets)
-    print(
-        f"PDF: {len(result)} unique assets from {base}",
-        file=sys.stderr,
+    hq = sum(
+        1
+        for a in result
+        if _pdf_row_high_quality(
+            kind,
+            a.get("assetName") or "",
+            a.get("value"),
+            a.get("latitude"),
+            a.get("longitude"),
+        )
     )
+    if kind not in ("ny_assessment", "investor") and hq < 5:
+        print(
+            f"PDF {base}: dropped {len(result)} rows (kind={kind}, high_quality={hq})",
+            file=sys.stderr,
+        )
+        return []
+
+    print(f"PDF: {len(result)} unique assets from {base} (hq={hq})", file=sys.stderr)
     return result[:500]
 
 

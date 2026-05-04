@@ -174,16 +174,10 @@ export class ExtractionService {
       }
 
       const allAssets = [...ruleBasedAssets, ...aiAssets];
-      const seen = new Set<string>();
-      const deduped = allAssets.filter((a) => {
-        const key = a.assetName.toLowerCase().trim();
-        if (seen.has(key) || !key || key.length < 2) return false;
-        seen.add(key);
-        return true;
-      });
+      const deduped = this.deduplicateAssetsByNormalizedName(allAssets);
 
       this.logger.log(
-        `Total: ${deduped.length} assets (${ruleBasedAssets.length} rule-based + ${aiAssets.length} AI) for ${sourceFile}`,
+        `Total: ${deduped.length} assets (${ruleBasedAssets.length} rule-based + ${aiAssets.length} AI, after name dedupe) for ${sourceFile}`,
       );
       return deduped;
     } catch (err: unknown) {
@@ -194,6 +188,49 @@ export class ExtractionService {
       this.currentJobId = '';
       this.currentSourceFile = '';
     }
+  }
+
+  /**
+   * Merge rows that refer to the same entity (e.g. same plant on Utility vs Plant sheets).
+   */
+  private deduplicateAssetsByNormalizedName(assets: Asset[]): Asset[] {
+    const seen = new Map<string, Asset>();
+    const passthrough: Asset[] = [];
+
+    for (const asset of assets) {
+      const raw = (asset.assetName ?? '').trim().toLowerCase();
+      if (!raw) {
+        continue;
+      }
+      const compact = raw.replace(/[^a-z0-9]/g, '');
+      const key =
+        compact.length < 12 ? `__raw__:${raw.slice(0, 80)}` : compact.slice(0, 40);
+
+      if (compact.length < 4) {
+        passthrough.push(asset);
+        continue;
+      }
+
+      const existing = seen.get(key);
+      if (!existing) {
+        seen.set(key, asset);
+        continue;
+      }
+
+      const existingHasCoords =
+        existing.latitude != null && existing.longitude != null;
+      const newHasCoords = asset.latitude != null && asset.longitude != null;
+      const existingConf = existing.overallConfidence ?? 0;
+      const newConf = asset.overallConfidence ?? 0;
+
+      if (newHasCoords && !existingHasCoords) {
+        seen.set(key, asset);
+      } else if (newConf > existingConf) {
+        seen.set(key, asset);
+      }
+    }
+
+    return [...Array.from(seen.values()), ...passthrough];
   }
 
   private async extractWithRulesEngine(
