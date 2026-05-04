@@ -608,6 +608,9 @@ def extract_from_zip(file_path: str) -> list:
     import tempfile
     import zipfile
 
+    MAX_ASSETS_PER_ENTRY = 500
+    MAX_TOTAL_ASSETS = 2000
+
     assets = []
     SUPPORTED = {".csv", ".xlsx", ".xls", ".pdf"}
     base = os.path.basename(file_path)
@@ -625,6 +628,17 @@ def extract_from_zip(file_path: str) -> list:
             print(f"ZIP: {len(all_names)} processable files ({base})", file=sys.stderr)
 
             for entry_name in all_names:
+                if len(assets) >= MAX_TOTAL_ASSETS:
+                    print(
+                        f"ZIP cap reached: {MAX_TOTAL_ASSETS} raw rows before dedupe",
+                        file=sys.stderr,
+                    )
+                    break
+
+                room = max(0, MAX_TOTAL_ASSETS - len(assets))
+                if room == 0:
+                    break
+
                 ext = os.path.splitext(entry_name)[1].lower()
                 print(f"  Processing: {entry_name}", file=sys.stderr)
 
@@ -649,8 +663,18 @@ def extract_from_zip(file_path: str) -> list:
                                 "sourceEvidence", []
                             )
 
-                        assets.extend(extracted)
-                        print(f"  -> {len(extracted)} assets", file=sys.stderr)
+                        slice_take = extracted[: min(MAX_ASSETS_PER_ENTRY, room)]
+                        assets.extend(slice_take)
+                        print(
+                            f"  -> {len(slice_take)} assets (of {len(extracted)} from entry)",
+                            file=sys.stderr,
+                        )
+                        if len(assets) >= MAX_TOTAL_ASSETS:
+                            print(
+                                f"ZIP cap reached: {MAX_TOTAL_ASSETS} raw rows before dedupe",
+                                file=sys.stderr,
+                            )
+                            break
 
                     finally:
                         try:

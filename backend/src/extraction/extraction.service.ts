@@ -208,12 +208,15 @@ export class ExtractionService {
       return [];
     }
 
+    const ruleEngineTimeoutMs =
+      (fileType ?? '').toLowerCase() === 'zip' ? 600_000 : 120_000;
+
     try {
       const { stdout, stderr } = await execFileAsync(
         this.resolvePythonExecutable(),
         [scriptPath, filePath],
         {
-          timeout: 120_000,
+          timeout: ruleEngineTimeoutMs,
           maxBuffer: 10 * 1024 * 1024,
         },
       );

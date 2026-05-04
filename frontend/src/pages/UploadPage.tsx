@@ -1,15 +1,24 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { api } from '../api/client';
 
 type UploadResponse = {
   jobId: string;
+  status?: 'complete' | 'processing' | 'failed';
+  message?: string;
   assetCount: number;
   assets: unknown[];
   duplicatesFound: number;
+};
+
+type JobStatusResponse = {
+  status: string;
+  assetCount: number;
+  error?: string;
+  message?: string;
 };
 
 const ACCEPT = {
@@ -34,14 +43,26 @@ function formatBytes(bytes: number): string {
 
 export function UploadPage() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const [file, setFile] = useState<File | null>(null);
+  const zipPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const zipPollStopRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (zipPollRef.current) clearInterval(zipPollRef.current);
+      if (zipPollStopRef.current) clearTimeout(zipPollStopRef.current);
+    };
+  }, []);
 
   const { mutateAsync, isPending } = useMutation({
     mutationFn: async (f: File) => {
       const fd = new FormData();
       fd.append('file', f);
+      const isZip = f.name.toLowerCase().endsWith('.zip');
       const res = await api.post<UploadResponse>('/ingestion/upload', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: isZip ? 660_000 : 120_000,
       });
       return res.data;
     },
@@ -72,6 +93,55 @@ export function UploadPage() {
     }
     try {
       const data = await mutateAsync(file);
+
+      if (data.status === 'processing') {
+        toast.success('ZIP uploaded — processing in background');
+        if (zipPollRef.current) clearInterval(zipPollRef.current);
+        if (zipPollStopRef.current) clearTimeout(zipPollStopRef.current);
+
+        zipPollRef.current = setInterval(async () => {
+          try {
+            const s = await api.get<JobStatusResponse>(
+              `/ingestion/jobs/${data.jobId}/status`,
+              { timeout: 15_000 },
+            );
+            const st = s.data;
+            if (st.status === 'complete') {
+              if (zipPollRef.current) clearInterval(zipPollRef.current);
+              zipPollRef.current = null;
+              if (zipPollStopRef.current) clearTimeout(zipPollStopRef.current);
+              zipPollStopRef.current = null;
+              await qc.invalidateQueries({ queryKey: ['assets', 'all'] });
+              await qc.invalidateQueries({ queryKey: ['assets', 'review'] });
+              toast.success(`Done! ${st.assetCount} assets extracted`);
+              navigate('/assets');
+            } else if (st.status === 'error') {
+              if (zipPollRef.current) clearInterval(zipPollRef.current);
+              zipPollRef.current = null;
+              if (zipPollStopRef.current) clearTimeout(zipPollStopRef.current);
+              zipPollStopRef.current = null;
+              toast.error(st.error ?? 'ZIP processing failed');
+            }
+          } catch (pollErr) {
+            const msg =
+              pollErr instanceof Error ? pollErr.message : 'Status poll failed';
+            toast.error(msg);
+          }
+        }, 5000);
+
+        zipPollStopRef.current = setTimeout(() => {
+          if (zipPollRef.current) clearInterval(zipPollRef.current);
+          zipPollRef.current = null;
+          zipPollStopRef.current = null;
+        }, 600_000);
+        return;
+      }
+
+      if (data.status === 'failed') {
+        toast.error(data.message ?? 'Processing failed');
+        return;
+      }
+
       toast.success(`${data.assetCount} assets extracted`);
       navigate('/assets');
     } catch (e) {

@@ -15,6 +15,11 @@ async function bootstrap() {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
 
+  const server = app.getHttpServer();
+  server.setTimeout(600_000);
+  server.keepAliveTimeout = 600_000;
+  server.headersTimeout = 610_000;
+
   await app.listen(3000);
 }
 bootstrap();
