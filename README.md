@@ -69,6 +69,29 @@ Field-level confidence is supplied by extractors and refined in **ConfidenceServ
 - PDF upload → rule-based and/or AI rows depending on PDF content and keys.
 - Frontend: asset table, formatted values, source file column, review tab.
 
+## Supported file types
+
+| Format | Example files | Extraction method |
+|--------|----------------|-------------------|
+| CSV | `data_gov_bldg_rexus.csv` | Rule-based column mapping (`extract_tables.py`) |
+| Excel (.xlsx / .xls) | `frpp-data-summarized-by-installation-name-fy24.xlsx`, EIA-860 workbooks | **openpyxl** + header row detection (rows 0–5) |
+| PDF (digital) | Annual reports, investor presentations | **pdfplumber** tables (lines/text strategies) + numeric line heuristics |
+| PDF (assessment roll) | e.g. municipality final assessment rolls | Text-line value patterns + table fallbacks |
+| ZIP | `eia8602024.zip`, `V20240104.zip`, `f8612024.zip`, `rempd-v1_0_csv.zip` | Recursive extraction of nested CSV / Excel / PDF |
+
+## Dataset coverage (examples)
+
+The rule engine is designed for real-world assessment and energy datasets, including:
+
+- **EIA Form 860 (2024)** — US power generation facilities (plants, lat/lon, state, utility).
+- **European energy plants (e.g. V20240104)** — Solar, wind, hydro, biogas, cogeneration (coordinates where present).
+- **EIA Form 861 (2024)** — US electric utility statistics (state / table-oriented Excel).
+- **REMPD** — Renewable energy material and capacity projections (CSV in ZIP).
+- **US government buildings (GSA)** — Federal building inventory CSVs.
+- **Federal Real Property Profile (FY2024)** — Installation-level federal assets (Excel).
+- **Municipal assessment rolls** — Property tax / assessed value PDFs (NY and similar).
+- **Annual reports & investor decks** — CRE / REIT PDFs (tables + narrative heuristics; optional Gemini for PDF-only augmentation).
+
 ## License
 
 Private / assessment use unless otherwise stated.
