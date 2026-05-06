@@ -1,103 +1,142 @@
 # Asset Extraction & Reconciliation Platform
 
-Technical assessment: ingest financial documents (PDF, Excel, CSV), extract structured assets using **OpenAI + Claude AI**, score confidence, reconcile duplicates, validate fields, and expose a canonical in-memory registry via a NestJS API and React UI.
+Full-stack platform that ingests financial documents, extracts structured asset records using AI and rule-based engines, reconciles duplicates, scores confidence, and exposes a canonical in-memory registry via NestJS API and React UI.
 
-## Architecture overview
+## Architecture Overview
 
-- **Backend**: NestJS modular pipeline — **Ingestion** → **DocumentUnderstanding** → **Extraction** (Python rule engine + OpenAI + Claude) → **Inference** → **Confidence** → **Validation** → **Reconciliation** → **Assets** (in-memory store).
-- **Frontend**: React + TypeScript — upload, asset list with FactType badges, review queue with validation flags, delta/changes tab, asset detail modal.
-- **AI layer**: **OpenAI GPT-4o-mini** for primary PDF extraction + **Claude Haiku** (Anthropic) for secondary cross-validation. CSV/Excel use rule-based extraction only (no API key needed).
-- **Rule engine**: Python `backend/src/scripts/extract_tables.py` using **csv** (stdlib), **openpyxl** (xlsx/xls), **pdfplumber** (PDF tables).
+**Backend** — NestJS modular pipeline:
+`Ingestion → DocumentUnderstanding → Extraction → Confidence → Reconciliation → Assets`
 
-## Quick start
+**Frontend** — React + TypeScript:
+Upload page, asset table with delta view, review queue, asset detail modal with field-level confidence badges.
+
+**AI Layer** — Dual pipeline:
+- OpenAI GPT-4o-mini for primary PDF extraction
+- Claude (Anthropic) for validation and correction of extracted assets
+
+**Rule Engine** — Python (`src/scripts/extract_tables.py`):
+- CSV / Excel: direct row mapping with header detection
+- PDF: pdfplumber table detection + numeric line heuristics
+
+## Quick Start
 
 ```bash
-# Backend
 cd backend && npm install && npm run start:dev
-
-# Frontend
 cd frontend && npm install && npm start
 ```
 
-## Environment variables
+Backend: port 3000. Frontend: port 3001.
 
-Create `backend/.env` (see `backend/.env.example`):
-
-```env
-OPENAI_API_KEY=your_openai_key_here
-ANTHROPIC_API_KEY=your_anthropic_key_here
-PYTHON_RULE_ENGINE=        # optional: full path to python executable
-```
-
-The app runs **without** API keys for CSV and Excel uploads (rule-based). Missing keys gracefully skip AI extraction — PDFs still yield rows via pdfplumber.
-
-## Python dependencies
+## Python Dependencies
 
 ```bash
 python -m pip install pdfplumber openpyxl
 ```
 
-## AI Pipeline
+Set `PYTHON_RULE_ENGINE` in `backend/.env` to your Python path if needed.
 
-| Step | Model | Purpose |
-|------|-------|---------|
-| Primary extraction | OpenAI GPT-4o-mini | Extract assets from PDF text chunks |
-| Cross-validation | Claude Haiku (Anthropic) | Validate, correct, and supplement OpenAI results |
-| Fallback | Rule engine (Python) | CSV, Excel, PDF tables — no API key needed |
+## Environment Variables
 
-## Inference Engine
+Create `backend/.env`:
 
-When fields are missing, `InferenceService` fills them automatically:
-- **Currency** — inferred from jurisdiction (50+ mappings, e.g. "New York" → USD)
-- **Asset type** — keyword matching (e.g. "solar farm" → renewable_energy)
-- **Coordinates** — OpenStreetMap Nominatim geocoding (free, no key)
-- **Value** — numeric pattern extraction from source text
+```
+OPENAI_API_KEY=your_openai_key
+ANTHROPIC_API_KEY=your_anthropic_key
+```
 
-Inferred fields are marked `factType: "inferred"` vs `"extracted"` for directly stated values.
+CSV and Excel extraction works without API keys. AI is used only for PDF narrative extraction.
 
-## Validation
+## Ingestion Strategy
 
-`ValidationService` runs 5 checks on every asset:
-- `INVALID_LATITUDE / INVALID_LONGITUDE` — out of range coordinates
-- `NULL_ISLAND_COORDINATES` — (0, 0) placeholder detection
-- `UNIT_SCALE_MISMATCH` — value too small vs "millions/billions" in source text
-- `DUPLICATE_VALUE_COLLISION` — same name+jurisdiction with >20% value difference
-- `HQ_MISATTRIBUTION` — physical asset coordinates pointing to financial district
-- `UNSUPPORTED_PRECISION` — value with >2 decimal places not found in source
+Files classified by extension: `pdf`, `xlsx`, `xls`, `csv`, `zip`. ZIP archives are recursively unpacked and each file processed independently. File type detection uses both extension and MIME type. Supported datasets include EIA Form 860, EIA Form 861, European energy plants (V20240104), US Federal Real Property (FRPP), GSA government buildings, municipal assessment rolls, and financial annual reports.
 
-## Delta Tracking
+## OCR Approach
 
-When the same document is re-uploaded, `AssetsService.computeDelta()` tracks:
-- Added assets
-- Removed assets
-- Modified fields (with old/new values)
+Born-digital PDFs parsed via `pdf-parse` for text layer. Text density measured per page — low density flags document as likely scanned (`needsOcr: true`). Full OCR via Tesseract is an extension point in `DocumentUnderstandingService`. pdfplumber handles table extraction from digital PDFs including assessment rolls and investor presentations.
 
-Access via `GET /assets/delta/:jobId` or the **Changes tab** in the UI.
+## Table Extraction Strategy
 
-## Confidence scoring
+- **CSV / Excel**: Python rule engine uses openpyxl with header row auto-detection (rows 0–5). Columns mapped by keyword matching across 40+ field aliases (name, value, currency, lat, lon, jurisdiction, asset type, capacity).
+- **PDF**: pdfplumber extracts tables and applies numeric line heuristics for value detection. Supports EIA 860, FRPP, V20240104 European energy, municipal assessment roll formats, and REIT/annual report tables.
 
-Field-level confidence refined in `ConfidenceService`. Review recommendation: `auto-accept` (>85%), `review` (50–85%), `reject` (<50%). UI shows green/yellow/red pills.
+## Entity Resolution & Duplicate Detection
 
-## Supported file types
+`ReconciliationService` normalises names (lowercase, strip punctuation, compact whitespace) and clusters candidates using fuzzy key matching on `name|jurisdiction`. Within each cluster, fields merged by highest confidence. Conflicts preserved with `factType: conflicting`. Each asset carries `duplicateClusterId` where applicable.
 
-| Format | Extraction method |
-|--------|------------------|
-| CSV | Rule-based column mapping |
-| Excel (.xlsx / .xls) | openpyxl + header detection |
-| PDF (digital) | pdfplumber + OpenAI + Claude |
-| ZIP | Recursive extraction |
+## Value Estimation Strategy
 
-## Dataset coverage
+When value absent, system infers using:
+1. Direct extraction from adjacent numeric fields (sqft × rate, capacity × unit price)
+2. Assessed value from municipal assessment rolls (Kingston, Saugerties, Western, Ava)
+3. Portfolio-level allocation when only totals present — flagged `factType: estimated`
 
-- EIA Form 860 (2024) — US power plants
-- European renewable energy plants
-- EIA Form 861 — US utility statistics
-- REMPD — Renewable energy projections
-- GSA buildings — Federal inventory
-- Federal Real Property Profile (FY2024)
-- Municipal assessment rolls (NY)
-- Annual reports & investor decks (REIT/CRE)
+All inferred values carry reduced confidence scores.
 
-## License
+## Geocoding Approach
 
-Private / assessment use.
+Coordinates resolved in priority order:
+1. Direct lat/lon columns in source (EIA 860 Plant file has exact coordinates per plant)
+2. European plants from V20240104 carry x/y coordinates natively
+3. Address geocoding via Nominatim (OpenStreetMap) with 1s rate limiting and retry
+4. County-level centroid fallback using bundled `vcerare-county-lat-long-fips.csv`
+5. Null if no location evidence found — flagged for review
+
+## Confidence Scoring
+
+Field-level confidence by extractor type:
+- `extracted` (direct from source): 0.85–1.0
+- `inferred` (derived from context): 0.5–0.75  
+- `estimated` (approximated): 0.3–0.5
+- `conflicting` (contradiction detected): 0.1–0.3
+
+Overall confidence = weighted average of field scores.
+
+Review recommendation:
+- `auto-accept`: overall > 0.85
+- `review`: overall 0.5–0.85
+- `reject`: overall < 0.5
+
+## Provenance Model
+
+Every field is fully traceable. Each asset carries:
+- `sourceEvidence[]` — exact quotes or row references from source
+- `explanation` — human-readable extraction rationale
+- `factType` — per-field classification
+- `sourceFile` + `sourceJobId` — full traceability to ingestion job
+- `fieldConfidence` — per-field confidence scores
+- `validationFlags` — detected issues with severity
+
+## Review Queue & Abstention Logic
+
+Assets with `overallConfidence < 0.85` or validation flags routed to review queue. Analysts accept or reject individually. Delta view shows field-level changes between extraction runs for the same job. System abstains (routes to review) when evidence is insufficient or contradictory rather than guessing.
+
+## Validation Rules
+
+System detects:
+- Impossible coordinates (lat outside -90/90, lon outside -180/180)
+- Unit mismatches (MW vs MWh, sqft vs acres)
+- Value-basis conflicts (book vs market on same asset)
+- Duplicate collisions across files
+- Portfolio total double-counting
+- Unsupported precision (coordinates with 0 decimal places flagged as estimated)
+- HQ address misattributed as asset location
+
+## Supported File Types
+
+| Format | Example | Extraction |
+|--------|---------|------------|
+| CSV | GSA buildings, REMPD | Rule-based column mapping |
+| Excel | EIA 860, EIA 861, FRPP | openpyxl + header detection |
+| PDF (digital) | Annual reports, investor decks | pdfplumber + AI |
+| PDF (assessment roll) | Kingston, Saugerties, Western, Ava | Text-line value patterns |
+| ZIP | EIA 860, V20240104, REMPD | Recursive extraction |
+
+## Scaling & Batch Processing
+
+- Jobs processed sequentially per file within a ZIP
+- In-memory store suitable for assessment volumes; swap `AssetsService` store for PostgreSQL/Redis for production
+- AI extraction rate-limited to 3 chunks per file with 3s delays to respect API limits
+- Python rule engine timeout: 120s standard, 600s for ZIP files
+- maxBuffer: 50MB to handle large Excel files (EIA 860 Generator file: 13,000+ rows)
+```
+

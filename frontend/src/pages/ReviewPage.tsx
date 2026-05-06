@@ -2,17 +2,14 @@ import React from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { api } from '../api/client';
-import type { Asset } from '../types/asset';
+import type { Asset, ValidationFlag } from '../types/asset';
 
 async function fetchReviewAssets(): Promise<Asset[]> {
   const res = await api.get<Asset[]>('/assets/review');
   return res.data;
 }
 
-async function patchReviewRecommendation(
-  id: string,
-  reviewRecommendation: Asset['reviewRecommendation'],
-): Promise<Asset> {
+async function patchReviewRecommendation(id: string, reviewRecommendation: Asset['reviewRecommendation']): Promise<Asset> {
   const res = await api.patch<Asset>(`/assets/${id}`, { reviewRecommendation });
   return res.data;
 }
@@ -23,6 +20,12 @@ function Field(props: { label: string; value: React.ReactNode }) {
       <div className="aep-kv__k">{props.label}</div>
       <div className="aep-kv__v">{props.value}</div>
     </div>
+  );
+}
+
+function normalizeFlags(flags: ValidationFlag[]): ValidationFlag[] {
+  return (flags ?? []).map((f) =>
+    typeof f === 'string' ? { code: f, severity: 'warning' as const, message: f } : f as ValidationFlag,
   );
 }
 
@@ -38,9 +41,7 @@ export function ReviewPage() {
     mutationFn: ({ id, rec }: { id: string; rec: Asset['reviewRecommendation'] }) =>
       patchReviewRecommendation(id, rec),
     onSuccess: (_updated, vars) => {
-      qc.setQueryData<Asset[]>(['assets', 'review'], (prev) =>
-        (prev ?? []).filter((a) => a.id !== vars.id),
-      );
+      qc.setQueryData<Asset[]>(['assets', 'review'], (prev) => (prev ?? []).filter((a) => a.id !== vars.id));
       qc.invalidateQueries({ queryKey: ['assets', 'all'] }).catch(() => undefined);
     },
   });
@@ -68,99 +69,72 @@ export function ReviewPage() {
       </div>
 
       {isLoading ? (
-        <div className="aep-card">Loading…</div>
+        <div className="aep-card">Loading...</div>
       ) : items.length === 0 ? (
         <div className="aep-card">No assets currently need review.</div>
       ) : (
         <div className="aep-grid">
-          {items.map((a) => (
-            <div key={a.id} className="aep-card">
-              <div className="aep-card__title">{a.assetName || 'Unnamed asset'}</div>
-              <div className="aep-card__subtitle">
-                Confidence {(a.overallConfidence * 100).toFixed(0)}% • Source {a.sourceFile}
-              </div>
+          {items.map((a) => {
+            const flags = normalizeFlags(a.validationFlags);
+            return (
+              <div key={a.id} className="aep-card">
+                <div className="aep-card__title">{a.assetName || 'Unnamed asset'}</div>
+                <div className="aep-card__subtitle">
+                  Confidence {(a.overallConfidence * 100).toFixed(0)}% | Source {a.sourceFile}
+                </div>
 
-              <div className="aep-kvgrid">
-                <Field label="Type" value={a.assetType ?? '—'} />
-                <Field
-                  label="Value"
-                  value={
-                    <span className="aep-mono">
-                      {a.value ?? '—'} {a.currency ?? ''}
-                    </span>
-                  }
-                />
-                <Field label="Jurisdiction" value={a.jurisdiction ?? '—'} />
-                <Field
-                  label="Coordinates"
-                  value={
-                    <span className="aep-mono">
-                      {a.latitude ?? '—'}, {a.longitude ?? '—'}
-                    </span>
-                  }
-                />
-                <Field label="Duplicate Cluster" value={a.duplicateClusterId ?? '—'} />
-                <Field label="Value Basis" value={a.valueBasis ?? '—'} />
-                <Field label="Parent" value={a.parentAssetId ?? '—'} />
-                <Field label="Children" value={a.childAssetIds?.length ? a.childAssetIds.join(', ') : '—'} />
-              </div>
+                <div className="aep-kvgrid">
+                  <Field label="Type" value={a.assetType ?? '—'} />
+                  <Field label="Value" value={<span className="aep-mono">{a.value ?? '—'} {a.currency ?? ''}</span>} />
+                  <Field label="Jurisdiction" value={a.jurisdiction ?? '—'} />
+                  <Field label="Coordinates" value={<span className="aep-mono">{a.latitude ?? '—'}, {a.longitude ?? '—'}</span>} />
+                  <Field label="Duplicate Cluster" value={a.duplicateClusterId ?? '—'} />
+                  <Field label="Value Basis" value={a.valueBasis ?? '—'} />
+                  <Field label="Parent" value={a.parentAssetId ?? '—'} />
+                  <Field label="Children" value={a.childAssetIds?.length ? a.childAssetIds.join(', ') : '—'} />
+                </div>
 
-              <div className="aep-subsection">
-                <div className="aep-subsection__title">Source evidence</div>
-                {a.sourceEvidence?.length ? (
-                  <div className="aep-evidence">
-                    {a.sourceEvidence.map((q, idx) => (
-                      <blockquote key={idx} className="aep-quote">
-                        {q}
-                      </blockquote>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="aep-muted">No evidence provided.</div>
-                )}
-              </div>
+                <div className="aep-subsection">
+                  <div className="aep-subsection__title">Source evidence</div>
+                  {a.sourceEvidence?.length ? (
+                    <div className="aep-evidence">
+                      {a.sourceEvidence.map((q, idx) => <blockquote key={idx} className="aep-quote">{q}</blockquote>)}
+                    </div>
+                  ) : <div className="aep-muted">No evidence provided.</div>}
+                </div>
 
-              <div className="aep-subsection">
-                <div className="aep-subsection__title">Validation flags</div>
-                {a.validationFlags?.length ? (
-                  <div className="aep-flags">
-                    {a.validationFlags.map((f) => (
-                      <span key={f} className="aep-flag">
-                        {f}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="aep-muted">No validation flags.</div>
-                )}
-              </div>
+                <div className="aep-subsection">
+                  <div className="aep-subsection__title">Validation flags</div>
+                  {flags.length > 0 ? (
+                    <div className="aep-flags">
+                      {flags.map((f, i) => (
+                        <span key={i} style={{
+                          background: f.severity === 'error' ? '#fee2e2' : '#fef9c3',
+                          color: f.severity === 'error' ? '#991b1b' : '#92400e',
+                          border: '1px solid ' + (f.severity === 'error' ? '#fca5a5' : '#fde047'),
+                          borderRadius: 4, padding: '2px 8px', fontSize: 12, marginRight: 4, marginBottom: 4, display: 'inline-block'
+                        }}>
+                          {f.severity === 'error' ? '🔴' : '⚠️'} {f.code}: {f.message}
+                        </span>
+                      ))}
+                    </div>
+                  ) : <div className="aep-muted" style={{ color: '#16a34a' }}>No validation flags.</div>}
+                </div>
 
-              <div className="aep-subsection">
-                <div className="aep-subsection__title">Explanation</div>
-                <pre className="aep-pre">{a.explanation || '—'}</pre>
-              </div>
+                <div className="aep-subsection">
+                  <div className="aep-subsection__title">Explanation</div>
+                  <pre className="aep-pre">{a.explanation || '—'}</pre>
+                </div>
 
-              <div className="aep-actions">
-                <button
-                  className="aep-btn aep-btn--primary"
-                  disabled={mutation.isPending}
-                  onClick={() => act(a.id, 'auto-accept')}
-                >
-                  Accept
-                </button>
-                <button
-                  className="aep-btn aep-btn--danger"
-                  disabled={mutation.isPending}
-                  onClick={() => act(a.id, 'reject')}
-                >
-                  Reject
-                </button>
+                <div className="aep-actions">
+                  <button className="aep-btn aep-btn--primary" disabled={mutation.isPending} onClick={() => act(a.id, 'auto-accept')}>Accept</button>
+                  <button className="aep-btn aep-btn--danger" disabled={mutation.isPending} onClick={() => act(a.id, 'reject')}>Reject</button>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
-
