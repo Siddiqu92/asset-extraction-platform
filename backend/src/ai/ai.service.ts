@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+﻿import { Injectable, Logger } from '@nestjs/common';
 
 export interface AiAssetResult {
   assetName: string;
@@ -16,7 +16,7 @@ export interface AiAssetResult {
   overallConfidence: number;
   sourceEvidence: string[];
   explanation: string;
-  validationFlags: string[];
+  validationFlags: { code: string; severity: 'warning' | 'error'; message: string }[];
   duplicateClusterId: string | null;
   reviewRecommendation: 'auto-accept' | 'review' | 'reject';
   factType: Record<string, string>;

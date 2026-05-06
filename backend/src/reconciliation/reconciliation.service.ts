@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+﻿import { Injectable, Logger } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import { Asset, AssetFactType, ValidationFlag } from '../assets/asset.entity';
 import { ValidationService } from '../validation/validation.service';
@@ -222,7 +222,7 @@ export class ReconciliationService {
 
     for (const field of fields) {
       const { value, confidence, conflicting } = this.pickBestField(cluster, field as string);
-      (merged as Record<string, unknown>)[field] = value;
+      (merged as unknown as Record<string, unknown>)[field] = value;
       merged.fieldConfidence[field as string] = confidence;
       if (conflicting) {
         merged.factType[field as string] = 'conflicting';
@@ -248,7 +248,7 @@ export class ReconciliationService {
     field: string,
   ): { value: unknown; confidence: number; conflicting: boolean } {
     const vals = cluster.map((a) => ({
-      value: (a as Record<string, unknown>)[field],
+      value: (a as unknown as Record<string, unknown>)[field],
       confidence: this.clamp01(Number((a.fieldConfidence ?? {})[field] ?? 0)),
       factType: (a.factType ?? {})[field] as AssetFactType | undefined,
     }));
@@ -316,3 +316,4 @@ export class ReconciliationService {
     return Math.max(0, Math.min(1, n));
   }
 }
+

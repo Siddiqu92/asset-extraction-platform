@@ -1,10 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+﻿import { Injectable, Logger } from '@nestjs/common';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { Asset, AssetFactType, ReviewRecommendation } from '../assets/asset.entity';
+import { Asset, AssetFactType, ReviewRecommendation, ValidationFlag } from '../assets/asset.entity';
 import { AiService } from '../ai/ai.service';
 
 const execFileAsync = promisify(execFile);
@@ -20,7 +20,6 @@ export type ExtractInput = {
 @Injectable()
 export class ExtractionService {
   private readonly logger = new Logger(ExtractionService.name);
-
   private currentJobId = '';
   private currentSourceFile = '';
   private readonly chunkSizeChars = 30_000;
@@ -45,7 +44,6 @@ export class ExtractionService {
       return fromEnv;
     }
     if (this.resolvedPythonPath) return this.resolvedPythonPath;
-
     const launcher = process.platform === 'win32' ? 'python' : 'python3';
     try {
       const out = execFileSync(
@@ -58,7 +56,6 @@ export class ExtractionService {
         return out;
       }
     } catch { /* use launcher */ }
-
     this.resolvedPythonPath = launcher;
     return launcher;
   }
@@ -69,7 +66,6 @@ export class ExtractionService {
     this.currentSourceFile = sourceFile;
 
     try {
-      // Step 1: Rule-based extraction (CSV, Excel, PDF tables)
       let ruleBasedAssets: Asset[] = [];
       if (filePath && fs.existsSync(filePath)) {
         this.logger.log(`Running rule-based extraction for ${sourceFile}`);
@@ -77,7 +73,6 @@ export class ExtractionService {
         this.logger.log(`Rule-based: ${ruleBasedAssets.length} assets from ${sourceFile}`);
       }
 
-      // Step 2: AI extraction for PDFs with text content
       let aiAssets: Asset[] = [];
       const ft = (fileType ?? '').toLowerCase();
       const isPdf = ft === 'pdf';
@@ -104,26 +99,17 @@ export class ExtractionService {
           const filteredText = this.filterRelevantText(documentText);
           const chunks = this.chunkText(filteredText);
           this.logger.log(`AI extraction: ${chunks.length} chunks for ${sourceFile}`);
-
-          // Process max 3 chunks
           const chunksToProcess = chunks.slice(0, 3);
           for (let i = 0; i < chunksToProcess.length; i++) {
             this.logger.log(`Processing AI chunk ${i + 1}/${chunksToProcess.length}`);
-
-            // Step A: OpenAI primary extraction
             const openAiRaw = await this.aiService.extractWithOpenAI(chunksToProcess[i]);
             this.logger.log(`OpenAI chunk ${i + 1}: ${openAiRaw.length} assets`);
-
-            // Step B: Claude cross-validation
             const validated = await this.aiService.validateWithClaude(chunksToProcess[i], openAiRaw);
             this.logger.log(`Claude validated chunk ${i + 1}: ${validated.length} assets`);
-
             if (validated.length > 0) {
               const mapped = this.mapParsedToAssets(validated, sourceFile, jobId);
               aiAssets.push(...mapped);
             }
-
-            // Rate limit delay between chunks
             if (i < chunksToProcess.length - 1) {
               await new Promise((res) => setTimeout(res, 3000));
             }
@@ -138,7 +124,6 @@ export class ExtractionService {
 
       const allAssets = [...ruleBasedAssets, ...aiAssets];
       const deduped = this.deduplicateAssetsByNormalizedName(allAssets);
-
       this.logger.log(
         `Total: ${deduped.length} assets (${ruleBasedAssets.length} rule + ${aiAssets.length} AI) for ${sourceFile}`,
       );
@@ -156,28 +141,22 @@ export class ExtractionService {
   private deduplicateAssetsByNormalizedName(assets: Asset[]): Asset[] {
     const seen = new Map<string, Asset>();
     const passthrough: Asset[] = [];
-
     for (const asset of assets) {
       const raw = (asset.assetName ?? '').trim().toLowerCase();
       if (!raw) continue;
       const compact = raw.replace(/[^a-z0-9]/g, '');
       const key = compact.length < 12 ? `__raw__:${raw.slice(0, 80)}` : compact.slice(0, 40);
-
       if (compact.length < 4) { passthrough.push(asset); continue; }
-
       const existing = seen.get(key);
       if (!existing) { seen.set(key, asset); continue; }
-
       const existingHasCoords = existing.latitude != null && existing.longitude != null;
       const newHasCoords = asset.latitude != null && asset.longitude != null;
-
       if (newHasCoords && !existingHasCoords) {
         seen.set(key, asset);
       } else if ((asset.overallConfidence ?? 0) > (existing.overallConfidence ?? 0)) {
         seen.set(key, asset);
       }
     }
-
     return [...Array.from(seen.values()), ...passthrough];
   }
 
@@ -189,20 +168,16 @@ export class ExtractionService {
       this.logger.warn(`Rule engine script not found: ${scriptPath}`);
       return [];
     }
-
     const timeoutMs = (fileType ?? '').toLowerCase() === 'zip' ? 600_000 : 120_000;
-
     try {
       const { stdout, stderr } = await execFileAsync(
         this.resolvePythonExecutable(),
         [scriptPath, filePath],
         { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
       );
-
       if (stderr?.trim()) {
         this.logger.warn(`Rule engine stderr: ${stderr.substring(0, 400)}`);
       }
-
       const parsed = JSON.parse(stdout || '[]') as unknown;
       if (!Array.isArray(parsed)) return [];
       return this.mapParsedToAssets(parsed, sourceFile, jobId);
@@ -226,6 +201,7 @@ export class ExtractionService {
           id: uuidv4(),
           assetName: this.toString(raw.assetName, ''),
           alternateName: this.toStringArray(raw.alternateName),
+          alternateNames: this.toStringArray((raw.alternateNames as unknown[]) ?? raw.alternateName),
           value: this.toNullableNumber(raw.value),
           currency: this.toNullableString(raw.currency),
           jurisdiction: this.toNullableString(raw.jurisdiction),
@@ -239,7 +215,7 @@ export class ExtractionService {
           overallConfidence: this.clamp01(overall),
           sourceEvidence: this.toStringArray(raw.sourceEvidence),
           explanation: this.toString(raw.explanation, ''),
-          validationFlags: this.toStringArray(raw.validationFlags),
+          validationFlags: [] as ValidationFlag[],
           duplicateClusterId: this.toNullableString(raw.duplicateClusterId),
           reviewRecommendation: this.normalizeReviewRecommendation(raw.reviewRecommendation, recommendation),
           factType: this.toRecordFactType(raw.factType),
@@ -257,12 +233,10 @@ export class ExtractionService {
     const keywords = ['asset','property','portfolio','investment','value','fair value',
       'million','billion','CAD','USD','GBP','EUR','AUD','building','land',
       'real estate','fund','equity','holding','acquisition','market value','book value'];
-
     const scored = lines.map((line) => {
       const lower = line.toLowerCase();
       return { score: keywords.filter((kw) => lower.includes(kw)).length };
     });
-
     const keepIndices = new Set<number>();
     scored.forEach((s, i) => {
       if (s.score > 0) {
@@ -271,7 +245,6 @@ export class ExtractionService {
         }
       }
     });
-
     const filtered = lines.filter((_, i) => keepIndices.has(i)).join('\n');
     return filtered.length > 500 ? filtered : text;
   }
@@ -280,7 +253,6 @@ export class ExtractionService {
     if (!text.trim()) return [];
     const max = this.chunkSizeChars;
     if (text.length <= max) return [text];
-
     const chunks: string[] = [];
     let start = 0;
     while (start < text.length) {

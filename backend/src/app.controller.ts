@@ -1,49 +1,12 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  NotFoundException,
-  Param,
-  Patch,
-} from '@nestjs/common';
-import { AssetsService } from './assets.service';
-import type { Asset, AssetDelta } from './asset.entity';
+﻿import { Controller, Get } from '@nestjs/common';
+import { AppService } from './app.service';
 
-@Controller('assets')
-export class AssetsController {
-  constructor(private readonly assetsService: AssetsService) {}
+@Controller()
+export class AppController {
+  constructor(private readonly appService: AppService) {}
 
   @Get()
-  getAll(): Asset[] {
-    return this.assetsService.getAllAssets();
-  }
-
-  @Get('review')
-  getForReview(): Asset[] {
-    return this.assetsService.getAssetsForReview();
-  }
-
-  @Get('delta/:jobId')
-  getDelta(@Param('jobId') jobId: string): AssetDelta[] {
-    return this.assetsService.getDeltaForJob(jobId);
-  }
-
-  @Get(':id')
-  getById(@Param('id') id: string): Asset {
-    const asset = this.assetsService.getAssetById(id);
-    if (!asset) throw new NotFoundException(`Asset not found: ${id}`);
-    return asset;
-  }
-
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updates: Partial<Asset>): Asset {
-    return this.assetsService.updateAsset(id, updates);
-  }
-
-  @Delete()
-  clearAll(): { ok: true } {
-    this.assetsService.clearAll();
-    return { ok: true };
+  getHello(): string {
+    return this.appService.getHello();
   }
 }
