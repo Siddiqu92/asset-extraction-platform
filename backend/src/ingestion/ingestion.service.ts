@@ -17,7 +17,7 @@ export interface FileInfo {
   originalName: string;
   fileName: string;
   filePath: string;
-  fileType: 'pdf' | 'xlsx' | 'xls' | 'csv' | 'zip' | 'unknown';
+  fileType: 'pdf' | 'xlsx' | 'xls' | 'csv' | 'zip' | 'xz' | 'unknown';
   fileSize: number;
   status: 'uploaded' | 'processing' | 'done' | 'failed';
   uploadedAt: Date;
@@ -43,7 +43,6 @@ export type ProcessFileResult = {
 @Injectable()
 export class IngestionService implements OnModuleInit {
   private readonly logger = new Logger(IngestionService.name);
-
   private readonly jobStatus = new Map<string, IngestionJobStatus>();
 
   constructor(
@@ -91,23 +90,25 @@ export class IngestionService implements OnModuleInit {
       datasetType: detectDatasetType(file.originalname),
     };
 
-    this.logger.log(`File uploaded: ${file.originalname} | Type: ${fileType} | jobId: ${jobId}`);
+    this.logger.log(
+      `File uploaded: ${file.originalname} | Type: ${fileType} | jobId: ${jobId}`,
+    );
 
-    if (fileType === 'zip') {
+    if (fileType === 'zip' || fileType === 'xz') {
       this.jobStatus.set(jobId, {
         status: 'extracting',
         assetCount: 0,
-        message: 'ZIP extraction started',
+        message:
+          fileType === 'xz' ? 'XZ extraction started' : 'ZIP extraction started',
       });
+
       void this.runZipPipelineInBackground(file, jobId, fileInfo).catch(
         (err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
-          this.logger.error(`Async ZIP processing failed ${jobId}: ${msg}`);
-          this.jobStatus.set(jobId, {
-            status: 'error',
-            assetCount: 0,
-            error: msg,
-          });
+          this.logger.error(
+            `Async ${fileType.toUpperCase()} processing failed ${jobId}: ${msg}`,
+          );
+          this.jobStatus.set(jobId, { status: 'error', assetCount: 0, error: msg });
         },
       );
 
@@ -125,8 +126,16 @@ export class IngestionService implements OnModuleInit {
     return this.runPipelineAndFinish(file, jobId, fileType, fileInfo);
   }
 
-  private async runZipPipelineInBackground(file: Express.Multer.File, jobId: string, fileInfo: FileInfo): Promise<void> {
-    const extracted = await this.zipIngestionService.extractAndProcess(file.path, jobId);
+  private async runZipPipelineInBackground(
+    file: Express.Multer.File,
+    jobId: string,
+    fileInfo: FileInfo,
+  ): Promise<void> {
+    const extracted = await this.zipIngestionService.extractAndProcess(
+      file.path,
+      jobId,
+    );
+
     this.jobStatus.set(jobId, {
       status: 'extracting',
       assetCount: 0,
@@ -142,14 +151,21 @@ export class IngestionService implements OnModuleInit {
         filename: path.basename(extractedPath),
         size: fs.statSync(extractedPath).size,
       };
-      const childType = this.detectFileType(extname(extractedPath).toLowerCase().replace('.', ''));
-      const result = await this.runPipelineAndFinish(child, `${jobId}:${child.filename}`, childType, {
-        ...fileInfo,
-        originalName: child.originalname,
-        fileName: child.filename,
-        filePath: child.path,
-        fileType: childType,
-      });
+      const childType = this.detectFileType(
+        extname(extractedPath).toLowerCase().replace('.', ''),
+      );
+      const result = await this.runPipelineAndFinish(
+        child,
+        `${jobId}:${child.filename}`,
+        childType,
+        {
+          ...fileInfo,
+          originalName: child.originalname,
+          fileName: child.filename,
+          filePath: child.path,
+          fileType: childType,
+        },
+      );
       combinedAssets = combinedAssets.concat(result.assets);
     }
 
@@ -179,6 +195,7 @@ export class IngestionService implements OnModuleInit {
         file.path,
         fileType,
       );
+
       const extracted = await this.extractionService.extractAssets({
         text: analysis.text,
         jobId,
@@ -194,10 +211,12 @@ export class IngestionService implements OnModuleInit {
       });
 
       const rescored = extracted.map((a) => this.confidenceService.scoreAsset(a));
-      const reconciled = this.reconciliationService.reconcile(rescored);
+
+      // reconcile is now async (calls InferenceService for geocoding)
+      const reconciled = await this.reconciliationService.reconcile(rescored);
       const canonical = reconciled.canonical;
 
-      this.assetsService.saveAssets(canonical);
+      this.assetsService.saveAssets(canonical, jobId);
 
       const duplicatesFound = Object.values(reconciled.duplicateClusters).reduce(
         (sum, ids) => sum + Math.max(0, ids.length - 1),
@@ -222,11 +241,7 @@ export class IngestionService implements OnModuleInit {
       fileInfo.status = 'failed';
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`Pipeline failed for job ${jobId}: ${msg}`);
-      this.jobStatus.set(jobId, {
-        status: 'error',
-        assetCount: 0,
-        error: msg,
-      });
+      this.jobStatus.set(jobId, { status: 'error', assetCount: 0, error: msg });
       return {
         jobId,
         status: 'failed',
@@ -238,12 +253,15 @@ export class IngestionService implements OnModuleInit {
     }
   }
 
-  private detectFileType(ext: string): 'pdf' | 'xlsx' | 'xls' | 'csv' | 'zip' | 'unknown' {
+  private detectFileType(
+    ext: string,
+  ): 'pdf' | 'xlsx' | 'xls' | 'csv' | 'zip' | 'xz' | 'unknown' {
     if (ext === 'pdf') return 'pdf';
     if (ext === 'xlsx') return 'xlsx';
     if (ext === 'xls') return 'xls';
     if (ext === 'csv') return 'csv';
     if (ext === 'zip') return 'zip';
+    if (ext === 'xz' || ext === 'txz') return 'xz';
     return 'unknown';
   }
 }

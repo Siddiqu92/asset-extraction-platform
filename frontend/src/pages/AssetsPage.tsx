@@ -45,20 +45,28 @@ function reviewLabel(r: Asset['reviewRecommendation']): string {
 function sourceTypeLabel(datasetType?: string): string {
   switch ((datasetType ?? 'UNKNOWN').toUpperCase()) {
     case 'NY_ASSESSMENT_ROLL':
-      return '🏛️ NY Assessment Roll';
+      return '🏛️ NY Assessment';
     case 'EIA860_PLANT':
     case 'EIA860_GENERATOR':
-      return '⚡ Power Plant (EIA-860)';
+      return '⚡ EIA-860 Plant';
     case 'GSA_BUILDINGS':
+      return '🏢 GSA Buildings';
     case 'FEDERAL_INSTALLATIONS':
-      return '🏢 Government Building';
+      return '🏢 Federal Facilities';
     case 'EUROPEAN_RENEWABLE':
-      return '🌬️ European Renewable';
+      return '🌬️ Renewable Energy';
     case 'CORPORATE_ANNUAL_REPORT':
+      return '🏦 Annual Report';
     case 'INVESTOR_PRESENTATION':
-      return '🏦 Corporate Report';
+      return '📊 Investor Presentation';
+    case 'SEC_FILING':
+      return '📄 SEC Filing';
     case 'EIA861_SALES':
-      return '📊 Utility Sales';
+      return '💡 Utility Sales';
+    case 'REMPD_REFERENCE':
+      return '📚 REMPD Reference';
+    case 'COUNTY_GEOCODING_REF':
+      return '🗺️ County Reference';
     default:
       return '—';
   }

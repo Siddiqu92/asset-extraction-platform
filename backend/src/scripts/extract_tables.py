@@ -45,6 +45,7 @@ DATASET_CONFIDENCE = {
     "FEDERAL_INSTALLATIONS": 0.50,
     "CORPORATE_ANNUAL_REPORT": 0.60,
     "INVESTOR_PRESENTATION": 0.65,
+    "SEC_FILING": 0.55,
     "REMPD_REFERENCE": 0.0,
     "COUNTY_GEOCODING_REF": 0.0,
     "UNKNOWN": 0.30,
@@ -75,17 +76,17 @@ def _review_from_confidence(confidence: float) -> str:
 
 def detect_dataset_type(filename: str) -> str:
     fn = (filename or "").lower()
-    if "assessment-roll" in fn or "assessment_roll" in fn:
+    if "assessment-roll" in fn or "assessment_roll" in fn or "final-assessment-roll" in fn or "assessment roll" in fn:
         return "NY_ASSESSMENT_ROLL"
     if "rexus" in fn or "bldg" in fn:
         return "GSA_BUILDINGS"
     if "frpp" in fn:
         return "FEDERAL_INSTALLATIONS"
-    if "plant_y20" in fn:
+    if "plant_y20" in fn or "eia860" in fn or "eia8602024" in fn:
         return "EIA860_PLANT"
     if "generator_y20" in fn:
         return "EIA860_PLANT"
-    if re.search(r"table_\d+", fn):
+    if re.search(r"table_\d+", fn) or "f861" in fn or "eia861" in fn:
         return "EIA861_SALES"
     if re.search(r"wind_energy|solar_energy|bioenergy|hydropower|energy_storage", fn):
         return "EUROPEAN_RENEWABLE"
@@ -93,9 +94,11 @@ def detect_dataset_type(filename: str) -> str:
         return "REMPD_REFERENCE"
     if "vcerare" in fn or "lat-long-fips" in fn:
         return "COUNTY_GEOCODING_REF"
-    if "investor-presentation" in fn or "investor_presentation" in fn:
+    if re.match(r"^\d{10}-\d{2}-\d{6}", fn) or "sec" in fn or "filing" in fn:
+        return "SEC_FILING"
+    if "investor-presentation" in fn or "investor_presentation" in fn or re.search(r"q\d-\d{4}-.*presentation|presentation.*q\d", fn):
         return "INVESTOR_PRESENTATION"
-    if "annual-report" in fn or "annual_report" in fn or "10-k" in fn:
+    if "annual-report" in fn or "annual_report" in fn or "annual report" in fn or "10-k" in fn or "10k" in fn:
         return "CORPORATE_ANNUAL_REPORT"
     return "UNKNOWN"
 
@@ -194,7 +197,7 @@ def make_asset(
 
 def extract_kw_q4_2024_top20_assets(file_path: str) -> list:
     base = os.path.basename(file_path).lower()
-    if base != "24-q4-investor-presentation.pdf":
+    if "investor" not in base or "presentation" not in base:
         return []
 
     # Strict override: only page 28 KW Top 20 assets.
@@ -287,11 +290,14 @@ def _is_pdf_garbage_name(name: str) -> bool:
     low = s.lower()
     if PDF_GARBAGE_LINE.search(s):
         return True
-    noise = ("incorporated", "securities and exchange", "forward-looking", "page ")
+    noise = ("incorporated", "securities and exchange", "forward-looking", "page ", "portfolio overview", "strategic review", "management discussion", "investor presentation", "annual report")
     if any(p in low for p in noise):
         return True
     letters = len(re.findall(r"[a-zA-Z]", s))
     if letters < 6:
+        return True
+    # Additional check: if the name is mostly uppercase and short, likely a heading
+    if len(s) < 50 and s.isupper() and not re.search(r"\d", s):
         return True
     return False
 
@@ -952,6 +958,7 @@ def extract_from_pdf_tables(file_path: str) -> list:
 
     kw_override = extract_kw_q4_2024_top20_assets(file_path)
     if kw_override:
+        print(f"KW override: returning {len(kw_override)} hardcoded assets", file=sys.stderr)
         return kw_override
 
     try:
@@ -1389,6 +1396,68 @@ def extract_frpp_excel(file_path, county_lookup):
     return out[:120000]
 
 
+# ─── XZ ─────────────────────────────────────────────────────────────────────
+
+
+def extract_from_xz(file_path: str) -> list:
+    import tempfile
+    import tarfile
+    assets = []
+    SUPPORTED = {".csv", ".xlsx", ".xls", ".pdf", ".geojson"}
+    base = os.path.basename(file_path)
+
+    try:
+        with tarfile.open(file_path, "r:xz") as tar:
+            members = [m for m in tar.getmembers() if m.isfile() and os.path.splitext(m.name)[1].lower() in SUPPORTED]
+
+            for member in members:
+                ext = os.path.splitext(member.name)[1].lower()
+
+                try:
+                    raw = tar.extractfile(member)
+                    if raw is None:
+                        continue
+                    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                        tmp.write(raw.read())
+                        tmp_path = tmp.name
+
+                    try:
+                        ename = member.name.lower()
+                        if "rempd" in ename:
+                            extracted = []
+                        elif ext == ".csv":
+                            extracted = extract_from_csv(tmp_path)
+                        elif ext in (".xlsx", ".xls"):
+                            extracted = extract_from_xlsx(tmp_path)
+                        elif ext == ".pdf":
+                            extracted = extract_from_pdf_tables(tmp_path)
+                        else:
+                            extracted = []
+
+                        for a in extracted:
+                            a["sourceEvidence"] = [f"XZ:{member.name}"] + a.get(
+                                "sourceEvidence", []
+                            )
+
+                        assets.extend(extracted)
+
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+
+                except Exception as e:
+                    print(f"  Member {member.name} failed: {e}", file=sys.stderr)
+
+    except Exception as e:
+        print(f"XZ open error: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+
+    result = dedup(assets)
+    return result[:150000]
+
+
 # ─── MAIN ───────────────────────────────────────────────────────────────────
 
 
@@ -1417,6 +1486,8 @@ if __name__ == "__main__":
             assets = extract_from_pdf_tables(file_path)
         elif ext == ".zip":
             assets = extract_from_zip(file_path)
+        elif ext == ".xz" or ext == ".txz":
+            assets = extract_from_xz(file_path)
         else:
             assets = []
 

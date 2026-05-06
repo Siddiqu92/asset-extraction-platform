@@ -27,6 +27,8 @@ const ACCEPT = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
   'text/csv': ['.csv'],
   'application/zip': ['.zip'],
+  'application/x-xz': ['.xz'],
+  'application/x-tar': ['.tar.xz', '.txz'],
 } as const;
 
 function formatBytes(bytes: number): string {
@@ -59,12 +61,26 @@ export function UploadPage() {
     mutationFn: async (f: File) => {
       const fd = new FormData();
       fd.append('file', f);
-      const isZip = f.name.toLowerCase().endsWith('.zip');
+      const isArchive = f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.xz') || f.name.toLowerCase().endsWith('.tar.xz') || f.name.toLowerCase().endsWith('.txz');
       const res = await api.post<UploadResponse>('/ingestion/upload', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: isZip ? 660_000 : 120_000,
+        timeout: isArchive ? 660_000 : 120_000,
       });
       return res.data;
+    },
+  });
+
+  const { mutateAsync: clearAssets, isPending: isClearingAssets } = useMutation({
+    mutationFn: async () => {
+      await api.delete('/assets');
+      await qc.invalidateQueries({ queryKey: ['assets'] });
+    },
+    onSuccess: () => {
+      toast.success('Previous results cleared');
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : 'Failed to clear assets';
+      toast.error(msg);
     },
   });
 
@@ -95,7 +111,7 @@ export function UploadPage() {
       const data = await mutateAsync(file);
 
       if (data.status === 'processing') {
-        toast.success('ZIP uploaded — processing in background');
+        toast.success('Archive uploaded — processing in background');
         if (zipPollRef.current) clearInterval(zipPollRef.current);
         if (zipPollStopRef.current) clearTimeout(zipPollStopRef.current);
 
@@ -155,7 +171,7 @@ export function UploadPage() {
       <div className="aep-page__header">
         <h1 className="aep-h1">Upload</h1>
         <p className="aep-muted">
-          Drag-and-drop a document to extract assets. Supported: PDF, Excel, CSV, ZIP.
+          Drag-and-drop a document to extract assets. Supported: PDF, Excel, CSV, ZIP, XZ/TAR.XZ.
         </p>
       </div>
 
@@ -191,6 +207,9 @@ export function UploadPage() {
         ) : null}
 
         <div className="aep-actions">
+          <button className="aep-btn aep-btn--secondary" onClick={() => clearAssets()} disabled={isClearingAssets || isPending} style={{ marginRight: '0.5rem' }}>
+            {isClearingAssets ? 'Clearing…' : 'Clear Previous Results'}
+          </button>
           <button className="aep-btn aep-btn--primary" onClick={handleUpload} disabled={isPending}>
             {isPending ? (
               <span className="aep-spinner" aria-label="Uploading and processing" />
