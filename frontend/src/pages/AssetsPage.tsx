@@ -42,6 +42,28 @@ function reviewLabel(r: Asset['reviewRecommendation']): string {
   return 'Reject';
 }
 
+function sourceTypeLabel(datasetType?: string): string {
+  switch ((datasetType ?? 'UNKNOWN').toUpperCase()) {
+    case 'NY_ASSESSMENT_ROLL':
+      return '🏛️ NY Assessment Roll';
+    case 'EIA860_PLANT':
+    case 'EIA860_GENERATOR':
+      return '⚡ Power Plant (EIA-860)';
+    case 'GSA_BUILDINGS':
+    case 'FEDERAL_INSTALLATIONS':
+      return '🏢 Government Building';
+    case 'EUROPEAN_RENEWABLE':
+      return '🌬️ European Renewable';
+    case 'CORPORATE_ANNUAL_REPORT':
+    case 'INVESTOR_PRESENTATION':
+      return '🏦 Corporate Report';
+    case 'EIA861_SALES':
+      return '📊 Utility Sales';
+    default:
+      return '—';
+  }
+}
+
 export function AssetsPage() {
   const [selected, setSelected] = useState<Asset | null>(null);
 
@@ -87,18 +109,19 @@ export function AssetsPage() {
                 <th>Fact Type</th>
                 <th>Review</th>
                 <th>Source</th>
+                <th>Source Type</th>
               </tr>
             </thead>
             <tbody>
               {isLoading ? (
                 <tr>
-                  <td colSpan={11} className="aep-td-muted">
+                  <td colSpan={12} className="aep-td-muted">
                     Loading…
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="aep-td-muted">
+                  <td colSpan={12} className="aep-td-muted">
                     No assets yet. Upload a file to extract.
                   </td>
                 </tr>
@@ -130,6 +153,7 @@ export function AssetsPage() {
                     <td className="aep-td-muted" title={a.sourceFile}>
                       {a.sourceFile ?? '—'}
                     </td>
+                    <td>{sourceTypeLabel(a.datasetType)}</td>
                   </tr>
                 ))
               )}

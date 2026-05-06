@@ -1,11 +1,16 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { extname } from 'path';
+import * as path from 'path';
+import * as fs from 'fs';
 import { DocumentUnderstandingService } from '../document-understanding/document-understanding.service';
 import { ExtractionService } from '../extraction/extraction.service';
 import { ConfidenceService } from '../confidence/confidence.service';
 import { ReconciliationService } from '../reconciliation/reconciliation.service';
 import { AssetsService } from '../assets/assets.service';
 import { Asset } from '../assets/asset.entity';
+import { ZipIngestionService } from './zip-ingestion.service';
+import { CountyGeocodingService } from './county-geocoding.service';
+import { detectDatasetType } from './dataset-type.util';
 
 export interface FileInfo {
   jobId: string;
@@ -16,6 +21,7 @@ export interface FileInfo {
   fileSize: number;
   status: 'uploaded' | 'processing' | 'done' | 'failed';
   uploadedAt: Date;
+  datasetType?: string;
 }
 
 export type IngestionJobStatus = {
@@ -35,7 +41,7 @@ export type ProcessFileResult = {
 };
 
 @Injectable()
-export class IngestionService {
+export class IngestionService implements OnModuleInit {
   private readonly logger = new Logger(IngestionService.name);
 
   private readonly jobStatus = new Map<string, IngestionJobStatus>();
@@ -46,7 +52,23 @@ export class IngestionService {
     private readonly confidenceService: ConfidenceService,
     private readonly reconciliationService: ReconciliationService,
     private readonly assetsService: AssetsService,
+    private readonly zipIngestionService: ZipIngestionService,
+    private readonly countyGeocodingService: CountyGeocodingService,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    const candidates = [
+      path.join(process.cwd(), 'vcerare-county-lat-long-fips.csv'),
+      path.join(process.cwd(), '..', 'vcerare-county-lat-long-fips.csv'),
+      path.join(process.cwd(), '..', '..', 'vcerare-county-lat-long-fips.csv'),
+    ];
+    const existing = candidates.find((p) => fs.existsSync(p));
+    if (existing) {
+      await this.countyGeocodingService.loadCountyData(existing);
+    } else {
+      this.logger.warn('County geocoding reference CSV not found at startup');
+    }
+  }
 
   getJobStatus(jobId: string): IngestionJobStatus {
     return this.jobStatus.get(jobId) ?? { status: 'not-found', assetCount: 0 };
@@ -66,6 +88,7 @@ export class IngestionService {
       fileSize: file.size,
       status: 'uploaded',
       uploadedAt: new Date(),
+      datasetType: detectDatasetType(file.originalname),
     };
 
     this.logger.log(`File uploaded: ${file.originalname} | Type: ${fileType} | jobId: ${jobId}`);
@@ -76,7 +99,7 @@ export class IngestionService {
         assetCount: 0,
         message: 'ZIP extraction started',
       });
-      void this.runZipPipelineInBackground(file, jobId, fileType, fileInfo).catch(
+      void this.runZipPipelineInBackground(file, jobId, fileInfo).catch(
         (err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.error(`Async ZIP processing failed ${jobId}: ${msg}`);
@@ -102,13 +125,39 @@ export class IngestionService {
     return this.runPipelineAndFinish(file, jobId, fileType, fileInfo);
   }
 
-  private async runZipPipelineInBackground(
-    file: Express.Multer.File,
-    jobId: string,
-    fileType: FileInfo['fileType'],
-    fileInfo: FileInfo,
-  ): Promise<void> {
-    await this.runPipelineAndFinish(file, jobId, fileType, fileInfo);
+  private async runZipPipelineInBackground(file: Express.Multer.File, jobId: string, fileInfo: FileInfo): Promise<void> {
+    const extracted = await this.zipIngestionService.extractAndProcess(file.path, jobId);
+    this.jobStatus.set(jobId, {
+      status: 'extracting',
+      assetCount: 0,
+      message: `ZIP expanded (${extracted.length} files). Processing extracts...`,
+    });
+
+    let combinedAssets: Asset[] = [];
+    for (const extractedPath of extracted) {
+      const child: Express.Multer.File = {
+        ...file,
+        originalname: path.basename(extractedPath),
+        path: extractedPath,
+        filename: path.basename(extractedPath),
+        size: fs.statSync(extractedPath).size,
+      };
+      const childType = this.detectFileType(extname(extractedPath).toLowerCase().replace('.', ''));
+      const result = await this.runPipelineAndFinish(child, `${jobId}:${child.filename}`, childType, {
+        ...fileInfo,
+        originalName: child.originalname,
+        fileName: child.filename,
+        filePath: child.path,
+        fileType: childType,
+      });
+      combinedAssets = combinedAssets.concat(result.assets);
+    }
+
+    this.jobStatus.set(jobId, {
+      status: 'complete',
+      assetCount: combinedAssets.length,
+      message: `ZIP processing complete (${extracted.length} files)`,
+    });
     this.logger.log(`Background ZIP processing finished: ${jobId}`);
   }
 

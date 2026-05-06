@@ -9,6 +9,8 @@ import { ExtractionModule } from '../extraction/extraction.module';
 import { ConfidenceModule } from '../confidence/confidence.module';
 import { ReconciliationModule } from '../reconciliation/reconciliation.module';
 import { AssetsModule } from '../assets/assets.module';
+import { ZipIngestionService } from './zip-ingestion.service';
+import { CountyGeocodingService } from './county-geocoding.service';
 
 @Module({
   imports: [
@@ -41,7 +43,7 @@ import { AssetsModule } from '../assets/assets.module';
     AssetsModule,
   ],
   controllers: [IngestionController],
-  providers: [IngestionService],
+  providers: [IngestionService, ZipIngestionService, CountyGeocodingService],
   exports: [IngestionService],
 })
 export class IngestionModule {}

@@ -30,6 +30,7 @@ export interface Asset {
   factType: Record<string, AssetFactType>;
   sourceFile: string;
   sourceJobId: string;
+  datasetType?: string;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -315,6 +315,7 @@ export class ExtractionService {
           factType: this.toRecordFactType(raw.factType),
           sourceFile,
           sourceJobId: jobId,
+          datasetType: this.toNullableString(raw.datasetType) ?? undefined,
           createdAt: now,
           updatedAt: now,
         };
