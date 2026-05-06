@@ -7,10 +7,28 @@ export type AssetFactType =
 
 export type ReviewRecommendation = 'auto-accept' | 'review' | 'reject';
 
+export interface ValidationFlag {
+  code: string;
+  severity: 'warning' | 'error';
+  message: string;
+}
+
+export interface AssetDelta {
+  assetId: string;
+  assetName: string;
+  changeType: 'added' | 'removed' | 'modified';
+  changedFields: {
+    field: string;
+    oldValue: unknown;
+    newValue: unknown;
+  }[];
+}
+
 export interface Asset {
   id: string;
   assetName: string;
   alternateName: string[];
+  alternateNames: string[];
   value: number | null;
   currency: string | null;
   jurisdiction: string | null;
@@ -24,7 +42,7 @@ export interface Asset {
   overallConfidence: number;
   sourceEvidence: string[];
   explanation: string;
-  validationFlags: string[];
+  validationFlags: ValidationFlag[];
   duplicateClusterId: string | null;
   reviewRecommendation: ReviewRecommendation;
   factType: Record<string, AssetFactType>;
@@ -34,4 +52,3 @@ export interface Asset {
   createdAt: string | Date;
   updatedAt: string | Date;
 }
-
