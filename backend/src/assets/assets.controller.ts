@@ -1,4 +1,4 @@
-import {
+﻿import {
   Body,
   Controller,
   Delete,
@@ -24,8 +24,6 @@ export class AssetsController {
     return this.assetsService.getAssetsForReview();
   }
 
-  // NOTE: 'delta/:jobId' must be BEFORE ':id' — otherwise NestJS
-  // treats "delta" as an id param and routes to getById() instead.
   @Get('delta/:jobId')
   getDelta(@Param('jobId') jobId: string): AssetDelta[] {
     return this.assetsService.getDeltaForJob(jobId);
