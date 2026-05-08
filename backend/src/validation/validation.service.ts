@@ -17,6 +17,17 @@ const PHYSICAL_ASSET_TYPES = new Set([
   'transportation', 'utility',
 ]);
 
+// Energy asset types that carry capacity in MW (not MWh)
+const CAPACITY_ASSET_TYPES = new Set([
+  'energy', 'renewable_energy', 'power_plant', 'solar', 'wind',
+  'hydro', 'nuclear', 'gas', 'coal', 'biomass', 'geothermal',
+]);
+
+// Energy asset types that carry energy in MWh (not MW)
+const ENERGY_STORAGE_TYPES = new Set([
+  'battery', 'battery_storage', 'energy_storage', 'pumped_hydro_storage',
+]);
+
 @Injectable()
 export class ValidationService {
   private readonly logger = new Logger(ValidationService.name);
@@ -29,6 +40,7 @@ export class ValidationService {
 
     flags.push(...this.validateCoordinates(asset.latitude, asset.longitude));
     flags.push(...this.validateCurrencyUnitMatch(asset.value, asset.currency, asset.sourceEvidence));
+    flags.push(...this.validateEnergyUnitMismatch(asset));
     flags.push(...this.validateDuplicateCollision(asset, existingAssets));
     flags.push(...this.validateHQMisattribution(asset));
     flags.push(...this.validateUnsupportedPrecision(asset.value, asset.sourceEvidence));
@@ -105,6 +117,57 @@ export class ValidationService {
         code: 'UNIT_SCALE_MISMATCH',
         severity: 'warning',
         message: `Value ${value} seems too small — source mentions "thousands" (${currency ?? 'unknown currency'})`,
+      });
+    }
+
+    return flags;
+  }
+
+  /**
+   * Flag MW vs MWh confusion:
+   * - Power plants / generators should use MW (capacity) not MWh (energy)
+   * - Battery / storage assets should use MWh not MW
+   * Checks both the assetType and raw sourceEvidence text for unit signals.
+   */
+  validateEnergyUnitMismatch(asset: Asset): ValidationFlag[] {
+    const flags: ValidationFlag[] = [];
+    if (!asset.assetType) return flags;
+
+    const assetTypeLower = asset.assetType.toLowerCase().replace(/[\s_-]/g, '_');
+    const evidenceText = (asset.sourceEvidence ?? []).join(' ');
+    const evidenceLower = evidenceText.toLowerCase();
+
+    // Detect which unit appears in evidence
+    const hasMWh = /\bmwh\b/.test(evidenceLower);
+    const hasMW  = /\bmw\b(?!h)/.test(evidenceLower); // MW but not MWh
+
+    const isCapacityType  = CAPACITY_ASSET_TYPES.has(assetTypeLower) ||
+      [...CAPACITY_ASSET_TYPES].some((t) => assetTypeLower.includes(t));
+    const isStorageType   = ENERGY_STORAGE_TYPES.has(assetTypeLower) ||
+      [...ENERGY_STORAGE_TYPES].some((t) => assetTypeLower.includes(t));
+
+    if (isCapacityType && hasMWh && !hasMW) {
+      flags.push({
+        code: 'ENERGY_UNIT_MISMATCH',
+        severity: 'warning',
+        message: `Asset type "${asset.assetType}" typically uses MW (capacity) but source evidence contains MWh (energy). Verify unit — may indicate generation total rather than installed capacity.`,
+      });
+    }
+
+    if (isStorageType && hasMW && !hasMWh) {
+      flags.push({
+        code: 'ENERGY_UNIT_MISMATCH',
+        severity: 'warning',
+        message: `Asset type "${asset.assetType}" typically uses MWh (stored energy) but source evidence contains MW. Verify unit — may indicate power rating rather than storage capacity.`,
+      });
+    }
+
+    // Generic: if both MW and MWh appear for the same asset, flag ambiguity
+    if ((isCapacityType || isStorageType) && hasMW && hasMWh) {
+      flags.push({
+        code: 'ENERGY_UNIT_AMBIGUOUS',
+        severity: 'warning',
+        message: `Both "MW" and "MWh" found in source evidence for "${asset.assetType}" asset. Confirm whether value represents capacity (MW) or energy (MWh).`,
       });
     }
 

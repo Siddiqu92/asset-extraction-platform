@@ -8,7 +8,7 @@ import {
   Patch,
 } from '@nestjs/common';
 import { AssetsService } from './assets.service';
-import type { Asset } from './asset.entity';
+import type { Asset, AssetDelta } from './asset.entity';
 
 @Controller('assets')
 export class AssetsController {
@@ -22,6 +22,13 @@ export class AssetsController {
   @Get('review')
   getForReview(): Asset[] {
     return this.assetsService.getAssetsForReview();
+  }
+
+  // NOTE: 'delta/:jobId' must be BEFORE ':id' — otherwise NestJS
+  // treats "delta" as an id param and routes to getById() instead.
+  @Get('delta/:jobId')
+  getDelta(@Param('jobId') jobId: string): AssetDelta[] {
+    return this.assetsService.getDeltaForJob(jobId);
   }
 
   @Get(':id')
@@ -44,4 +51,3 @@ export class AssetsController {
     return { ok: true };
   }
 }
-
