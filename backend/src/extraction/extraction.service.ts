@@ -175,7 +175,7 @@ export class ExtractionService {
       const { stdout, stderr } = await execFileAsync(
         this.resolvePythonExecutable(),
         [scriptPath, filePath],
-        { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
+        { timeout: timeoutMs, maxBuffer: 50 * 1024 * 1024 },
       );
       if (stderr?.trim()) {
         this.logger.warn(`Rule engine stderr: ${stderr.substring(0, 400)}`);
