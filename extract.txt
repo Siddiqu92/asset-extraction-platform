@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+﻿import { Injectable, Logger } from '@nestjs/common';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -102,11 +102,9 @@ export class ExtractionService {
           const chunksToProcess = chunks.slice(0, 3);
           for (let i = 0; i < chunksToProcess.length; i++) {
             this.logger.log(`Processing AI chunk ${i + 1}/${chunksToProcess.length}`);
-            // FIX: pass sourceFile as fileName (second argument)
-            const openAiRaw = await this.aiService.extractWithOpenAI(chunksToProcess[i], sourceFile);
+            const openAiRaw = await this.aiService.extractWithOpenAI(chunksToProcess[i]);
             this.logger.log(`OpenAI chunk ${i + 1}: ${openAiRaw.length} assets`);
-            // FIX: correct argument order — assets first, then text
-            const validated = await this.aiService.validateWithClaude(openAiRaw, chunksToProcess[i]);
+            const validated = await this.aiService.validateWithClaude(chunksToProcess[i], openAiRaw);
             this.logger.log(`Claude validated chunk ${i + 1}: ${validated.length} assets`);
             if (validated.length > 0) {
               const mapped = this.mapParsedToAssets(validated, sourceFile, jobId);

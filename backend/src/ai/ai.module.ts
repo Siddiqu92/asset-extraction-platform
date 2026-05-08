@@ -1,3 +1,4 @@
+// FILE: backend/src/ai/ai.module.ts
 import { Module } from '@nestjs/common';
 import { AiService } from './ai.service';
 

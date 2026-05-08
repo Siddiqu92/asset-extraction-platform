@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+﻿import { Injectable, Logger } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import { Asset, AssetFactType, ValidationFlag } from '../assets/asset.entity';
 import { ValidationService } from '../validation/validation.service';
@@ -43,6 +43,7 @@ export class ReconciliationService {
       for (const asset of canonical) {
         const flags = this.validationService.validateAsset(asset, canonical);
         if (flags.length > 0) {
+          // Merge with any existing flags
           const existing = Array.isArray(asset.validationFlags)
             ? (asset.validationFlags as ValidationFlag[])
             : [];
@@ -64,35 +65,38 @@ export class ReconciliationService {
     }
   }
 
+  /**
+   * Enrich assets with inferred currency, assetType, coordinates
+   */
   private async enrichAssets(assets: Asset[]): Promise<Asset[]> {
     const enriched: Asset[] = [];
 
     for (const asset of assets) {
       const updated = { ...asset };
 
-      // FIX: InferenceResult returns object with .value — extract it
+      // Infer currency if missing
       if (!updated.currency && updated.jurisdiction) {
         const inferred = this.inferenceService.inferCurrency(updated.jurisdiction);
         if (inferred) {
-          updated.currency = inferred.value;  // <-- .value added
+          updated.currency = inferred;
           updated.factType = { ...updated.factType, currency: 'inferred' };
-          this.logger.debug(`Inferred currency "${inferred.value}" for "${updated.assetName}"`);
+          this.logger.debug(`Inferred currency "${inferred}" for "${updated.assetName}"`);
         }
       }
 
-      // FIX: inferAssetType second arg is string array, not joined string
+      // Infer assetType if missing
       if (!updated.assetType && updated.assetName) {
         const inferred = this.inferenceService.inferAssetType(
           updated.assetName,
-          updated.sourceEvidence ?? [],  // <-- pass array directly
+          updated.sourceEvidence?.join(' ') ?? '',
         );
         if (inferred) {
-          updated.assetType = inferred.value;  // <-- .value added
+          updated.assetType = inferred;
           updated.factType = { ...updated.factType, assetType: 'inferred' };
         }
       }
 
-      // FIX: method is inferCoordsFromState (not inferCoordinates), returns .value.lat/.value.lon
+      // Infer coordinates from jurisdiction if missing (skip if no jurisdiction)
       if (
         updated.latitude === null &&
         updated.longitude === null &&
@@ -100,10 +104,10 @@ export class ReconciliationService {
         updated.jurisdiction.length > 3
       ) {
         try {
-          const coords = this.inferenceService.inferCoordsFromState(updated.jurisdiction);  // <-- fixed method name
+          const coords = await this.inferenceService.inferCoordinates(updated.jurisdiction);
           if (coords) {
-            updated.latitude = coords.value.lat;   // <-- .value.lat
-            updated.longitude = coords.value.lon;  // <-- .value.lon
+            updated.latitude = coords.lat;
+            updated.longitude = coords.lon;
             updated.factType = {
               ...updated.factType,
               latitude: 'inferred',
@@ -312,3 +316,4 @@ export class ReconciliationService {
     return Math.max(0, Math.min(1, n));
   }
 }
+

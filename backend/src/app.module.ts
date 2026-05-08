@@ -1,3 +1,7 @@
+// ============================================================
+// FILE: backend/src/app.module.ts  (REPLACE existing file)
+// FIX: OcrModule add kiya
+// ============================================================
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { IngestionModule } from './ingestion/ingestion.module';
@@ -9,6 +13,7 @@ import { AssetsModule } from './assets/assets.module';
 import { AiModule } from './ai/ai.module';
 import { ValidationModule } from './validation/validation.module';
 import { InferenceModule } from './inference/inference.module';
+import { OcrModule } from './ocr/ocr.module';
 
 @Module({
   imports: [
@@ -16,6 +21,7 @@ import { InferenceModule } from './inference/inference.module';
     AiModule,
     ValidationModule,
     InferenceModule,
+    OcrModule,
     IngestionModule,
     DocumentUnderstandingModule,
     ExtractionModule,

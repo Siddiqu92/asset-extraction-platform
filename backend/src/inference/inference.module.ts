@@ -1,3 +1,4 @@
+// FILE: backend/src/inference/inference.module.ts
 import { Module } from '@nestjs/common';
 import { InferenceService } from './inference.service';
 

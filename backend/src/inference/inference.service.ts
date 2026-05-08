@@ -1,146 +1,184 @@
+// ============================================================
+// FILE: backend/src/inference/inference.service.ts
+// FIX: Infer missing currency, value, location, asset type
+// ============================================================
+import { Injectable } from '@nestjs/common';
 
-import { Injectable, Logger } from '@nestjs/common';
-
+// Jurisdiction → currency mapping
 const JURISDICTION_CURRENCY: Record<string, string> = {
-  'united states': 'USD', 'usa': 'USD', 'us': 'USD', 'new york': 'USD',
-  'california': 'USD', 'texas': 'USD', 'florida': 'USD', 'illinois': 'USD',
-  'canada': 'CAD', 'ontario': 'CAD', 'quebec': 'CAD', 'british columbia': 'CAD',
-  'united kingdom': 'GBP', 'uk': 'GBP', 'england': 'GBP', 'scotland': 'GBP',
-  'wales': 'GBP', 'london': 'GBP',
-  'germany': 'EUR', 'france': 'EUR', 'italy': 'EUR', 'spain': 'EUR',
-  'netherlands': 'EUR', 'belgium': 'EUR', 'austria': 'EUR', 'portugal': 'EUR',
-  'finland': 'EUR', 'ireland': 'EUR', 'luxembourg': 'EUR', 'greece': 'EUR',
-  'australia': 'AUD', 'new south wales': 'AUD', 'victoria': 'AUD',
-  'japan': 'JPY', 'china': 'CNY', 'india': 'INR', 'brazil': 'BRL',
-  'switzerland': 'CHF', 'sweden': 'SEK', 'norway': 'NOK', 'denmark': 'DKK',
-  'singapore': 'SGD', 'hong kong': 'HKD', 'south korea': 'KRW',
-  'new zealand': 'NZD', 'mexico': 'MXN', 'south africa': 'ZAR',
-  'uae': 'AED', 'dubai': 'AED', 'abu dhabi': 'AED',
-  'saudi arabia': 'SAR', 'qatar': 'QAR', 'kuwait': 'KWD',
+  usa: 'USD', 'united states': 'USD', us: 'USD',
+  uk: 'GBP', 'united kingdom': 'GBP', england: 'GBP', britain: 'GBP',
+  eu: 'EUR', europe: 'EUR', germany: 'EUR', france: 'EUR', italy: 'EUR',
+  spain: 'EUR', netherlands: 'EUR', belgium: 'EUR', austria: 'EUR',
+  japan: 'JPY', china: 'CNY', canada: 'CAD', australia: 'AUD',
+  switzerland: 'CHF', india: 'INR', brazil: 'BRL', mexico: 'MXN',
+  'south korea': 'KRW', russia: 'RUB', singapore: 'SGD',
+  'hong kong': 'HKD', 'new zealand': 'NZD', sweden: 'SEK',
+  norway: 'NOK', denmark: 'DKK', 'south africa': 'ZAR',
+  pakistan: 'PKR', 'saudi arabia': 'SAR', uae: 'AED',
 };
 
-const ASSET_TYPE_KEYWORDS: { keywords: string[]; type: string }[] = [
-  { keywords: ['solar', 'wind', 'renewable', 'hydro', 'geothermal'], type: 'renewable_energy' },
-  { keywords: ['power plant', 'power station', 'generation', 'nuclear'], type: 'energy' },
-  { keywords: ['oil', 'gas', 'pipeline', 'refinery', 'petroleum'], type: 'oil_and_gas' },
-  { keywords: ['office', 'commercial', 'retail', 'mall', 'shopping'], type: 'commercial_real_estate' },
-  { keywords: ['industrial', 'warehouse', 'factory', 'manufacturing'], type: 'industrial' },
-  { keywords: ['apartment', 'residential', 'housing', 'condo', 'flat'], type: 'residential' },
-  { keywords: ['airport', 'port', 'terminal', 'railway', 'highway', 'road', 'bridge'], type: 'transportation' },
-  { keywords: ['school', 'university', 'hospital', 'clinic', 'government'], type: 'public_infrastructure' },
-  { keywords: ['data center', 'telecom', 'fiber', 'tower', 'cell'], type: 'technology_infrastructure' },
-  { keywords: ['farm', 'agricultural', 'farmland', 'crop'], type: 'agriculture' },
-  { keywords: ['mine', 'mining', 'quarry', 'mineral'], type: 'mining' },
-  { keywords: ['hotel', 'resort', 'hospitality', 'lodging'], type: 'hospitality' },
-  { keywords: ['land', 'lot', 'parcel', 'site', 'plot'], type: 'land' },
-  { keywords: ['building', 'property', 'real estate', 'estate'], type: 'real_estate' },
-];
+// US state abbreviation → centroid [lat, lon]
+const US_STATE_CENTROIDS: Record<string, [number, number]> = {
+  AL: [32.7794, -86.8287], AK: [64.2008, -153.4937], AZ: [34.2744, -111.6602],
+  AR: [34.8938, -92.4426], CA: [37.1841, -119.4696], CO: [38.9972, -105.5478],
+  CT: [41.6219, -72.7273], DE: [38.9896, -75.5050], FL: [28.6305, -82.4497],
+  GA: [32.6415, -83.4426], HI: [20.2927, -156.3737], ID: [44.3509, -114.6130],
+  IL: [40.0417, -89.1965], IN: [39.8942, -86.2816], IA: [42.0751, -93.4960],
+  KS: [38.4937, -98.3804], KY: [37.5347, -85.3021], LA: [31.0689, -91.9968],
+  ME: [45.3695, -69.2428], MD: [39.0550, -76.7909], MA: [42.2596, -71.8083],
+  MI: [44.3467, -85.4102], MN: [46.2807, -94.3053], MS: [32.7364, -89.6678],
+  MO: [38.3566, -92.4580], MT: [46.8797, -110.3626], NE: [41.5378, -99.7951],
+  NV: [39.3289, -116.6312], NH: [43.6805, -71.5811], NJ: [40.1907, -74.6728],
+  NM: [34.4071, -106.1126], NY: [42.9538, -75.5268], NC: [35.5557, -79.3877],
+  ND: [47.4501, -100.4659], OH: [40.2862, -82.7937], OK: [35.5889, -97.4943],
+  OR: [43.9336, -120.5583], PA: [40.8781, -77.7996], RI: [41.6762, -71.5562],
+  SC: [33.9169, -80.8964], SD: [44.4443, -100.2263], TN: [35.8580, -86.3505],
+  TX: [31.4757, -99.3312], UT: [39.3210, -111.0937], VT: [44.0687, -72.6658],
+  VA: [37.5215, -78.8537], WA: [47.3826, -120.4472], WV: [38.6409, -80.6227],
+  WI: [44.6243, -89.9941], WY: [42.9957, -107.5512],
+};
+
+export interface InferenceResult<T> {
+  value: T;
+  confidence: number;
+  method: string;
+  explanation: string;
+}
 
 @Injectable()
 export class InferenceService {
-  private readonly logger = new Logger(InferenceService.name);
 
-  /**
-   * Infer currency from jurisdiction string
-   */
-  inferCurrency(jurisdiction: string | null): string | null {
+  // ── Currency from jurisdiction ──────────────────────────────────────
+  inferCurrency(jurisdiction: string | null): InferenceResult<string> | null {
     if (!jurisdiction) return null;
-    const key = jurisdiction.trim().toLowerCase();
+    const lower = jurisdiction.toLowerCase();
 
-    if (JURISDICTION_CURRENCY[key]) return JURISDICTION_CURRENCY[key];
+    for (const [key, currency] of Object.entries(JURISDICTION_CURRENCY)) {
+      if (lower.includes(key)) {
+        return {
+          value: currency,
+          confidence: 0.8,
+          method: 'jurisdiction-to-currency',
+          explanation: `Inferred ${currency} from jurisdiction "${jurisdiction}" matching "${key}"`,
+        };
+      }
+    }
 
-    // Partial match
-    for (const [jKey, currency] of Object.entries(JURISDICTION_CURRENCY)) {
-      if (key.includes(jKey) || jKey.includes(key)) return currency;
+    // Try state code pattern (e.g. ", TX, USA")
+    const stateMatch = lower.match(/\b([a-z]{2}),?\s*usa\b/);
+    if (stateMatch) {
+      return {
+        value: 'USD',
+        confidence: 0.85,
+        method: 'us-state-pattern',
+        explanation: `US state pattern detected in "${jurisdiction}" — inferred USD`,
+      };
     }
 
     return null;
   }
 
-  /**
-   * Infer asset type from name and context using keyword matching
-   */
-  inferAssetType(name: string, context = ''): string | null {
-    const combined = `${name} ${context}`.toLowerCase();
+  // ── Coordinates from US state ───────────────────────────────────────
+  inferCoordsFromState(jurisdiction: string | null): InferenceResult<{ lat: number; lon: number }> | null {
+    if (!jurisdiction) return null;
+    const upper = jurisdiction.toUpperCase();
 
-    for (const entry of ASSET_TYPE_KEYWORDS) {
-      if (entry.keywords.some((kw) => combined.includes(kw))) {
-        return entry.type;
+    // Match 2-letter state codes
+    for (const [code, [lat, lon]] of Object.entries(US_STATE_CENTROIDS)) {
+      if (upper.includes(` ${code},`) || upper.includes(` ${code} `) ||
+          upper.endsWith(` ${code}`) || upper.startsWith(`${code},`)) {
+        return {
+          value: { lat, lon },
+          confidence: 0.4,
+          method: 'state-centroid',
+          explanation: `State centroid used for ${code} — not asset-level coordinates`,
+        };
       }
     }
 
     return null;
   }
 
-  /**
-   * Infer coordinates from address using OpenStreetMap Nominatim (free, no key)
-   */
-  async inferCoordinates(address: string): Promise<{ lat: number; lon: number } | null> {
-    if (!address?.trim()) return null;
+  // ── Asset type from context keywords ───────────────────────────────
+  inferAssetType(name: string, evidence: string[]): InferenceResult<string> | null {
+    const text = `${name} ${evidence.join(' ')}`.toLowerCase();
 
-    try {
-      const encoded = encodeURIComponent(address.trim());
-      const url = `https://nominatim.openstreetmap.org/search?q=${encoded}&format=json&limit=1`;
-
-      const resp = await fetch(url, {
-        headers: { 'User-Agent': 'AssetExtractionPlatform/1.0' },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!resp.ok) {
-        this.logger.warn(`Nominatim error ${resp.status} for address: ${address}`);
-        return null;
-      }
-
-      const data = await resp.json() as { lat: string; lon: string }[];
-      if (!data?.length) return null;
-
-      const lat = parseFloat(data[0].lat);
-      const lon = parseFloat(data[0].lon);
-
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-
-      this.logger.debug(`Inferred coordinates for "${address}": ${lat}, ${lon}`);
-      return { lat, lon };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(`inferCoordinates failed for "${address}": ${msg}`);
-      return null;
-    }
-  }
-
-  /**
-   * Infer value from raw context text — looks for currency + number patterns
-   */
-  inferValue(context: string): { value: number; basis: string; confidence: number } | null {
-    if (!context?.trim()) return null;
-
-    const patterns = [
-      // $1.5 billion / USD 1.5B
-      { re: /(?:USD|CAD|GBP|EUR|AUD|[\$£€])\s*([\d,]+(?:\.\d+)?)\s*billion/i, multiplier: 1_000_000_000, basis: 'estimated' },
-      { re: /(?:USD|CAD|GBP|EUR|AUD|[\$£€])\s*([\d,]+(?:\.\d+)?)\s*million/i, multiplier: 1_000_000, basis: 'estimated' },
-      { re: /(?:USD|CAD|GBP|EUR|AUD|[\$£€])\s*([\d,]+(?:\.\d+)?)\s*(?:thousand|k)/i, multiplier: 1_000, basis: 'estimated' },
-      // plain number with currency
-      { re: /(?:USD|CAD|GBP|EUR|AUD|[\$£€])\s*([\d,]+(?:\.\d+)?)/i, multiplier: 1, basis: 'extracted' },
-      // number followed by B/M/K
-      { re: /([\d,]+(?:\.\d+)?)\s*B(?:\b|illion)/i, multiplier: 1_000_000_000, basis: 'estimated' },
-      { re: /([\d,]+(?:\.\d+)?)\s*M(?:\b|illion)/i, multiplier: 1_000_000, basis: 'estimated' },
+    const rules: Array<[RegExp, string]> = [
+      [/solar|photovoltaic|pv\s*plant/, 'Solar Power Plant'],
+      [/wind\s*(farm|turbine|park)/, 'Wind Farm'],
+      [/hydro(electric)?|dam|reservoir/, 'Hydroelectric Plant'],
+      [/nuclear|atomic\s*power/, 'Nuclear Plant'],
+      [/gas\s*(plant|turbine)|natural\s*gas/, 'Gas Power Plant'],
+      [/coal\s*(plant|mine|power)/, 'Coal Plant'],
+      [/power\s*plant|generation\s*facility/, 'Power Plant'],
+      [/office\s*(building|park|tower)|commercial\s*(building|real\s*estate)/, 'Commercial Real Estate'],
+      [/warehouse|industrial|manufacturing\s*plant/, 'Industrial Property'],
+      [/apartment|residential|housing/, 'Residential Real Estate'],
+      [/hotel|resort|hospitality/, 'Hospitality Property'],
+      [/pipeline|transmission\s*line/, 'Infrastructure'],
+      [/utility|electric\s*(co|company|cooperative)/, 'Electric Utility'],
+      [/assessment|parcel|land\s*record/, 'Real Property'],
+      [/federal\s*(building|facility|installation)/, 'Government Building'],
     ];
 
-    for (const { re, multiplier, basis } of patterns) {
-      const match = context.match(re);
-      if (match) {
-        const raw = parseFloat(match[1].replace(/,/g, ''));
-        if (Number.isFinite(raw) && raw > 0) {
-          return {
-            value: raw * multiplier,
-            basis,
-            confidence: basis === 'extracted' ? 0.8 : 0.6,
-          };
-        }
+    for (const [pattern, type] of rules) {
+      if (pattern.test(text)) {
+        return {
+          value: type,
+          confidence: 0.7,
+          method: 'keyword-matching',
+          explanation: `Asset type inferred from name/evidence keywords matching pattern ${pattern.source}`,
+        };
       }
     }
 
     return null;
+  }
+
+  // ── Value estimation: portfolio total / count ───────────────────────
+  estimateValueFromPortfolio(
+    portfolioTotal: number,
+    assetCount: number,
+  ): InferenceResult<number> | null {
+    if (!portfolioTotal || !assetCount || assetCount === 0) return null;
+    const estimated = portfolioTotal / assetCount;
+    return {
+      value: Math.round(estimated),
+      confidence: 0.3,
+      method: 'portfolio-average',
+      explanation: `Estimated as portfolio total ${portfolioTotal} ÷ ${assetCount} assets = ${Math.round(estimated)}. Low confidence — use only as placeholder.`,
+    };
+  }
+
+  // ── Validate: impossible coordinate check ──────────────────────────
+  validateCoordinates(lat: number | null, lon: number | null): string[] {
+    const flags: string[] = [];
+    if (lat === null && lon === null) return flags;
+    if (lat !== null && (lat < -90 || lat > 90)) flags.push(`INVALID_LATITUDE:${lat}`);
+    if (lon !== null && (lon < -180 || lon > 180)) flags.push(`INVALID_LONGITUDE:${lon}`);
+    if (lat === 0 && lon === 0) flags.push('NULL_ISLAND_COORDINATES');
+    return flags;
+  }
+
+  // ── Validate: portfolio double-counting ────────────────────────────
+  detectDoubleCountedAssets(assets: Array<{ assetName: string; value: number | null }>): string[] {
+    const seen = new Map<string, number[]>();
+    for (const a of assets) {
+      const key = a.assetName?.trim().toLowerCase();
+      if (!key) continue;
+      const vals = seen.get(key) || [];
+      if (a.value !== null) vals.push(a.value);
+      seen.set(key, vals);
+    }
+
+    const flags: string[] = [];
+    for (const [name, vals] of seen.entries()) {
+      if (vals.length > 1) {
+        const sum = vals.reduce((a, b) => a + b, 0);
+        flags.push(`DOUBLE_COUNTING:${name}:total=${sum}:occurrences=${vals.length}`);
+      }
+    }
+    return flags;
   }
 }
