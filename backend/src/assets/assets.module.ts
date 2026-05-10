@@ -1,11 +1,11 @@
 import { Module } from '@nestjs/common';
 import { AssetsService } from './assets.service';
 import { AssetsController } from './assets.controller';
+import { DeltaService } from './delta.service';
 
 @Module({
-  providers: [AssetsService],
+  providers: [AssetsService, DeltaService],
   controllers: [AssetsController],
-  exports: [AssetsService],
+  exports: [AssetsService, DeltaService],
 })
 export class AssetsModule {}
-

@@ -1,10 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as fs from 'fs';
 import * as xlsx from 'xlsx';
+import { OcrService } from '../ocr/ocr.service';
 
 @Injectable()
 export class DocumentUnderstandingService {
   private readonly logger = new Logger(DocumentUnderstandingService.name);
+
+  constructor(private readonly ocrService: OcrService) {}
 
   async analyzeFile(filePath: string, fileType: string): Promise<{
     text: string; needsOcr: boolean; pageCount: number; hasTable: boolean; rawText: string;
@@ -38,10 +41,38 @@ export class DocumentUnderstandingService {
       if (!pdfParse) throw new Error('pdf-parse did not export a function');
       const parsed = await pdfParse(buffer);
       const rawText = (parsed?.text ?? '').toString();
+      const pageCount = parsed?.numpages ?? 0;
+      const isScanned = this.ocrService.isScannedPdf(rawText, pageCount);
+
+      // ── OCR Integration ────────────────────────────────────────────
+      // If PDF has very little text (scanned/image-based), run OCR
+      if (isScanned) {
+        this.logger.log(`Scanned PDF detected (${rawText.trim().length} chars). Running OCR...`);
+        try {
+          const ocrResult = await this.ocrService.extractTextFromPdf(filePath);
+          if (ocrResult.text && ocrResult.text.trim().length > 50) {
+            this.logger.log(`OCR extracted ${ocrResult.text.length} chars via ${ocrResult.method}`);
+            return {
+              text: ocrResult.text,
+              rawText: ocrResult.text,
+              needsOcr: true,
+              pageCount: ocrResult.pageCount || pageCount,
+              hasTable: ocrResult.text.includes('\t'),
+            };
+          } else {
+            this.logger.warn('OCR returned insufficient text, falling back to raw PDF text');
+          }
+        } catch (ocrErr: any) {
+          this.logger.warn(`OCR failed, using raw text: ${ocrErr?.message ?? ocrErr}`);
+        }
+      }
+      // ──────────────────────────────────────────────────────────────
+
       return {
-        text: rawText, rawText,
-        needsOcr: rawText.trim().length < 100,
-        pageCount: parsed?.numpages ?? 0,
+        text: rawText,
+        rawText,
+        needsOcr: isScanned,
+        pageCount,
         hasTable: rawText.includes('\t'),
       };
     } catch (err: any) {
