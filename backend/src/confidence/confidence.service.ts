@@ -12,7 +12,9 @@ export class ConfidenceService {
     GSA_BUILDINGS: 0.55,
     FEDERAL_INSTALLATIONS: 0.5,
     EIA861_SALES: 0.7,
-    CORPORATE_ANNUAL_REPORT: 0.6,
+    // FIX: Raised from 0.6 → 0.65 so medium-confidence assets (with minor deductions)
+    // correctly land in the 0.5–0.85 "review" band instead of falling below 0.5
+    CORPORATE_ANNUAL_REPORT: 0.65,
     INVESTOR_PRESENTATION: 0.65,
     REMPD_REFERENCE: 0,
     COUNTY_GEOCODING_REF: 0,

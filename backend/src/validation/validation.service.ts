@@ -127,7 +127,6 @@ export class ValidationService {
    * Flag MW vs MWh confusion:
    * - Power plants / generators should use MW (capacity) not MWh (energy)
    * - Battery / storage assets should use MWh not MW
-   * Checks both the assetType and raw sourceEvidence text for unit signals.
    */
   validateEnergyUnitMismatch(asset: Asset): ValidationFlag[] {
     const flags: ValidationFlag[] = [];
@@ -137,9 +136,8 @@ export class ValidationService {
     const evidenceText = (asset.sourceEvidence ?? []).join(' ');
     const evidenceLower = evidenceText.toLowerCase();
 
-    // Detect which unit appears in evidence
     const hasMWh = /\bmwh\b/.test(evidenceLower);
-    const hasMW  = /\bmw\b(?!h)/.test(evidenceLower); // MW but not MWh
+    const hasMW  = /\bmw\b(?!h)/.test(evidenceLower);
 
     const isCapacityType  = CAPACITY_ASSET_TYPES.has(assetTypeLower) ||
       [...CAPACITY_ASSET_TYPES].some((t) => assetTypeLower.includes(t));
@@ -162,7 +160,6 @@ export class ValidationService {
       });
     }
 
-    // Generic: if both MW and MWh appear for the same asset, flag ambiguity
     if ((isCapacityType || isStorageType) && hasMW && hasMWh) {
       flags.push({
         code: 'ENERGY_UNIT_AMBIGUOUS',
@@ -205,13 +202,24 @@ export class ValidationService {
   }
 
   /**
-   * Flag if coordinates point to financial district but asset type is physical infrastructure
+   * Flag if coordinates point to financial district but asset type is physical infrastructure.
+   *
+   * FIX: Changed from exact Set.has() match to partial-match check using Array.some + includes().
+   * This handles compound asset types like 'energy_generation', 'wind_energy', 'solar_power_plant'
+   * that contain a known physical type as a substring but were not matching the exact Set entry.
    */
   validateHQMisattribution(asset: Asset): ValidationFlag[] {
     if (asset.latitude === null || asset.longitude === null) return [];
     if (!asset.assetType) return [];
 
-    const isPhysical = PHYSICAL_ASSET_TYPES.has((asset.assetType ?? '').toLowerCase());
+    // FIX: normalize spaces and hyphens to underscores so 'Solar Power Plant' → 'solar_power_plant'
+    // matches 'power_plant' in the set via partial-match (includes)
+    const assetTypeLower = (asset.assetType ?? '').toLowerCase().replace(/[\s-]+/g, '_');
+
+    const isPhysical =
+      PHYSICAL_ASSET_TYPES.has(assetTypeLower) ||
+      [...PHYSICAL_ASSET_TYPES].some((t) => assetTypeLower.includes(t));
+
     if (!isPhysical) return [];
 
     for (const district of FINANCIAL_DISTRICTS) {
